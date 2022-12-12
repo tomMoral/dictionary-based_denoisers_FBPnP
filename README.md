@@ -1,1 +1,1 @@
-# pnp_unrolling
+# Plug-and-Play with unrolled dictionary learning
