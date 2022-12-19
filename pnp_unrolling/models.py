@@ -6,9 +6,46 @@ import torch.fft as fft
 
 
 class SynthesisUnrolled(nn.Module):
+    """
+    Unrolled network based on Synthesis Dictionary Learning
 
-    def __init__(self, n_layers, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state):
+    Parameters
+    ----------
+    n_layers : int
+        Number of iterations/layers
+    n_components : int
+        Number of atoms/components in the dictionaries
+    kernel_size : int
+        Size of the atoms/components
+    n_channels : int
+        Number of channels in images
+    lmbd : float
+        Regluarization parameter of FISTA
+    device : str
+        Device for computations
+    dtype : type
+        Type of tensors
+    random_state : int, optional
+        Seed, by default 2147483647
+    avg : bool, optional
+        Work on normalized images, by default False
+    D_shared : bool, optional
+        Share dictionaries among layers, by default True
+    """
+
+    def __init__(
+        self,
+        n_layers,
+        n_components,
+        kernel_size,
+        n_channels,
+        lmbd,
+        device,
+        dtype,
+        random_state=2147483647,
+        avg=False,
+        D_shared=True
+    ):
 
         super().__init__()
 
@@ -16,6 +53,7 @@ class SynthesisUnrolled(nn.Module):
         self.device = device
         self.n_components = n_components
         self.kernel_size = kernel_size
+        self.avg = avg
 
         self.shape_params = (
             self.n_components,
@@ -27,18 +65,6 @@ class SynthesisUnrolled(nn.Module):
         self.generator = torch.Generator(self.device)
         self.generator.manual_seed(random_state)
 
-        self.model = nn.ModuleList(
-            [SynthesisLayer(
-                n_components,
-                kernel_size,
-                n_channels,
-                lmbd,
-                device,
-                dtype,
-                random_state
-            ) for i in range(n_layers)]
-        )
-
         self.parameter = nn.Parameter(
             torch.rand(
                 self.shape_params,
@@ -48,9 +74,35 @@ class SynthesisUnrolled(nn.Module):
             )
         )
 
+        if D_shared:
+            D_init = self.parameter
+
+        else:
+            D_init = None
+
+        self.model = nn.ModuleList(
+            [SynthesisLayer(
+                n_components,
+                kernel_size,
+                n_channels,
+                lmbd,
+                device,
+                dtype,
+                random_state,
+                D_shared=D_init
+            ) for i in range(n_layers)]
+        )
+
         self.convt = F.conv_transpose2d
 
     def forward(self, x):
+
+        if self.avg:
+            current_avg = torch.mean(x, axis=(2, 3), keepdim=True)
+            current_std = torch.std(x, axis=(2, 3), keepdim=True)
+            x_avg = (x - current_avg) / current_std
+        else:
+            x_avg = x
 
         out = torch.zeros(
             (x.shape[0],
@@ -65,8 +117,11 @@ class SynthesisUnrolled(nn.Module):
         t_old = 1.
 
         for layer in self.model:
-            x, out, t_old, out_old = layer(x, out, t_old, out_old)
+            x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
         out = self.convt(out, self.parameter)
+
+        if self.avg:
+            out = out * current_std + current_avg
 
         return torch.clip(out, 0, 1)
 
@@ -74,7 +129,7 @@ class SynthesisUnrolled(nn.Module):
 class SynthesisLayer(nn.Module):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state):
+                 device, dtype, random_state, D_shared=None):
 
         super().__init__()
 
@@ -96,14 +151,20 @@ class SynthesisLayer(nn.Module):
             self.kernel_size
         )
 
-        self.parameter = nn.Parameter(
-            torch.rand(
-                self.shape_params,
-                generator=self.generator,
-                dtype=self.dtype,
-                device=self.device,
+        if D_shared is None:
+
+            self.parameter = nn.Parameter(
+                torch.rand(
+                    self.shape_params,
+                    generator=self.generator,
+                    dtype=self.dtype,
+                    device=self.device,
+                )
             )
-        )
+
+        else:
+
+            self.parameter = D_shared
 
         self.step = 1.
 
@@ -114,11 +175,13 @@ class SynthesisLayer(nn.Module):
         """
         Compute the Lipschitz constant using the FFT.
         """
-        fourier_prior = fft.fftn(self.parameter, axis=(2, 3))
+        fourier_dictionary = fft.fftn(self.parameter, axis=(2, 3))
         lipschitz = (
             torch.max(
                 torch.max(
-                    torch.real(fourier_prior * torch.conj(fourier_prior)),
+                    torch.real(
+                        fourier_dictionary * torch.conj(fourier_dictionary)
+                    ),
                     dim=3,
                 )[0],
                 dim=2,
@@ -132,7 +195,7 @@ class SynthesisLayer(nn.Module):
 
     def forward(self, x, z, t_old, z_old):
 
-        self.step = 1 / self.compute_lipschitz()
+        step = self.step / self.compute_lipschitz()
 
         result1 = self.convt(z, self.parameter)
         result2 = self.conv(
@@ -140,8 +203,8 @@ class SynthesisLayer(nn.Module):
             self.parameter
         )
 
-        out = z - self.step * result2
-        thresh = torch.abs(out) - self.step * self.lmbd
+        out = z - step * result2
+        thresh = torch.abs(out) - step * self.lmbd
         out = torch.sign(out) * F.relu(thresh)
 
         # FISTA

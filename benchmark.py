@@ -1,12 +1,22 @@
 import pandas as pd
 import numpy as np
 import itertools
+import torch
 
-from pnp_unrolling.unrolled_denoiser import BaseUnrolling
 from joblib import Memory
 
-DATA_PATH = "/storage/store2/work/bmalezie/imagewoof/"
+from torch.optim import Adam
+from torch.optim.lr_scheduler import ExponentialLR
+
+from pnp_unrolling.models import SynthesisUnrolled
+from pnp_unrolling.datasets import create_imagewoof_dataloader
+from pnp_unrolling.train import train
+
+
+PATH_DATA = "/storage/store2/work/bmalezie/imagewoof/"
 RESULTS = "benchmark.csv"
+COLOR = True
+DEVICE = "cuda:3"
 mem = Memory(location='./tmp_unrolled_synthesis/', verbose=0)
 
 
@@ -14,22 +24,52 @@ mem = Memory(location='./tmp_unrolled_synthesis/', verbose=0)
 def run_test(params):
 
     try:
-        unrolled = BaseUnrolling(
-            n_layers=params["n_layers"],
-            n_components=params["n_components"],
-            kernel_size=params["kernel_size"],
-            n_channels=3,
-            lmbd=params["lmbd"],
-            path_data=DATA_PATH,
-            etamax=1e10,
-            etamin=1e6,
-            iterations=100
+        params_model = {
+            "n_layers": params["n_layers"],
+            "n_components": params["n_components"],
+            "kernel_size": params["kernel_size"],
+            "lmbd": params["lmbd"],
+            "n_channels": 3 if COLOR else 1,
+            "device": DEVICE,
+            "dtype": torch.float,
+            "avg": False,
+            "D_shared": params["D_shared"]
+        }
+
+        params_dataloader = {
+            "path_data": PATH_DATA,
+            "sigma_noise": 0.1,
+            "device": DEVICE,
+            "dtype": torch.float,
+            "mini_batch_size": 10,
+            "color": COLOR
+        }
+
+        unrolled_net = SynthesisUnrolled(**params_model)
+        train_dataloader = create_imagewoof_dataloader(
+            **params_dataloader,
+            train=True,
+        )
+        test_dataloader = create_imagewoof_dataloader(
+            **params_dataloader,
+            train=False,
         )
 
-        avg_train_losses, avg_test_losses, times = unrolled.fit()
+        optimizer = Adam(unrolled_net.parameters(), lr=0.1)
+        scheduler = ExponentialLR(optimizer, gamma=0.9)
+
+        train_loss, test_loss = train(
+            unrolled_net,
+            train_dataloader,
+            test_dataloader,
+            optimizer,
+            scheduler,
+            epochs=50,
+            max_batch=20
+        )
 
         results = {
-            "avg_test_losses": np.mean(avg_test_losses[:-10])
+            "avg_test_losses": np.mean(test_loss[:-5])
         }
 
     except (KeyboardInterrupt, SystemExit):
@@ -46,10 +86,11 @@ def run_test(params):
 if __name__ == "__main__":
 
     hyperparams = {
-        "n_components": [100, 200, 400, 800],
-        "kernel_size": [10, 15, 20],
+        "n_components": [50, 100, 200, 400],
+        "kernel_size": [5, 10, 15],
         "lmbd": [1e-5, 1e-3, 1e-1],
-        "n_layers": [5, 10, 20]
+        "n_layers": [5, 10, 20],
+        "D_shared": [True, False]
     }
 
     keys, values = zip(*hyperparams.items())
