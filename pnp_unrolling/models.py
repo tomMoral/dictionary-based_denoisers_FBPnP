@@ -164,7 +164,7 @@ class UnrolledNet(nn.Module):
             for layer in self.model:
                 x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
 
-            out = self.convt(out, self.parameter)    
+            out = self.convt(out, self.parameter)
 
         elif self.type_layer == "analysis":
             for layer in self.model:
