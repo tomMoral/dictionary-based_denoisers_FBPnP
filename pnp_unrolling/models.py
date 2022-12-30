@@ -5,9 +5,9 @@ import torch.nn.functional as F
 import torch.fft as fft
 
 
-class SynthesisUnrolled(nn.Module):
+class UnrolledNet(nn.Module):
     """
-    Unrolled network based on Synthesis Dictionary Learning
+    Unrolled network based on Synthesi or Analysis Dictionary Learning
 
     Parameters
     ----------
@@ -25,6 +25,8 @@ class SynthesisUnrolled(nn.Module):
         Device for computations
     dtype : type
         Type of tensors
+    type_layer : str
+        Type of layer, either 'analysis' or 'synthesis'
     random_state : int, optional
         Seed, by default 2147483647
     avg : bool, optional
@@ -42,6 +44,7 @@ class SynthesisUnrolled(nn.Module):
         lmbd,
         device,
         dtype,
+        type_layer="synthesis",
         random_state=2147483647,
         avg=False,
         D_shared=True
@@ -80,20 +83,61 @@ class SynthesisUnrolled(nn.Module):
         else:
             D_init = None
 
-        self.model = nn.ModuleList(
-            [SynthesisLayer(
-                n_components,
-                kernel_size,
-                n_channels,
-                lmbd,
-                device,
-                dtype,
-                random_state,
-                D_shared=D_init
-            ) for i in range(n_layers)]
-        )
+        self.type_layer = type_layer
+
+        if self.type_layer == "synthesis":
+
+            self.model = nn.ModuleList(
+                [SynthesisLayer(
+                    n_components,
+                    kernel_size,
+                    n_channels,
+                    lmbd,
+                    device,
+                    dtype,
+                    random_state,
+                    D_shared=D_init
+                ) for i in range(n_layers)]
+            )
+
+        elif self.type_layer == "analysis":
+
+            self.model = nn.ModuleList(
+                [AnalysisLayer(
+                    n_components,
+                    kernel_size,
+                    n_channels,
+                    lmbd,
+                    device,
+                    dtype,
+                    random_state,
+                    D_shared=D_init
+                ) for i in range(n_layers)]
+            )
 
         self.convt = F.conv_transpose2d
+
+    def compute_lipschitz(self):
+        """
+        Compute the Lipschitz constant using the FFT.
+        """
+        fourier_dictionary = fft.fftn(self.parameter, axis=(2, 3))
+        lipschitz = (
+            torch.max(
+                torch.max(
+                    torch.real(
+                        fourier_dictionary * torch.conj(fourier_dictionary)
+                    ),
+                    dim=3,
+                )[0],
+                dim=2,
+            )[0]
+            .sum()
+            .item()
+        )
+        if lipschitz == 0:
+            lipschitz = 1.0
+        return lipschitz
 
     def forward(self, x):
 
@@ -116,9 +160,18 @@ class SynthesisUnrolled(nn.Module):
         out_old = out.clone()
         t_old = 1.
 
-        for layer in self.model:
-            x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
-        out = self.convt(out, self.parameter)
+        if self.type_layer == "synthesis":
+            for layer in self.model:
+                x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
+
+            out = self.convt(out, self.parameter)    
+
+        elif self.type_layer == "analysis":
+            for layer in self.model:
+                x_avg, out = layer(x_avg, out)
+
+            step = 1. / self.compute_lipschitz()
+            out = x_avg - step * self.convt(out, self.parameter)
 
         if self.avg:
             out = out * current_std + current_avg
@@ -126,7 +179,7 @@ class SynthesisUnrolled(nn.Module):
         return torch.clip(out, 0, 1)
 
 
-class SynthesisLayer(nn.Module):
+class UnrolledLayer(nn.Module):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
                  device, dtype, random_state, D_shared=None):
@@ -166,8 +219,6 @@ class SynthesisLayer(nn.Module):
 
             self.parameter = D_shared
 
-        self.step = 1.
-
         self.conv = F.conv2d
         self.convt = F.conv_transpose2d
 
@@ -193,9 +244,30 @@ class SynthesisLayer(nn.Module):
             lipschitz = 1.0
         return lipschitz
 
+    def forward(self, x):
+
+        raise NotImplementedError
+
+
+class SynthesisLayer(UnrolledLayer):
+
+    def __init__(self, n_components, kernel_size, n_channels, lmbd,
+                 device, dtype, random_state, D_shared=None):
+
+        super().__init__(
+            n_components,
+            kernel_size,
+            n_channels,
+            lmbd,
+            device,
+            dtype,
+            random_state,
+            D_shared
+        )
+
     def forward(self, x, z, t_old, z_old):
 
-        step = self.step / self.compute_lipschitz()
+        step = 1. / self.compute_lipschitz()
 
         result1 = self.convt(z, self.parameter)
         result2 = self.conv(
@@ -204,11 +276,43 @@ class SynthesisLayer(nn.Module):
         )
 
         out = z - step * result2
-        thresh = torch.abs(out) - step * self.lmbd
-        out = torch.sign(out) * F.relu(thresh)
+        # thresh = torch.abs(out) - step * self.lmbd
+        # out = torch.sign(out) * F.relu(thresh)
+        out = out - torch.clip(
+            out,
+            -step * self.lmbd,
+            step * self.lmbd
+        )
 
         # FISTA
         t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
         z = out + ((t_old-1) / t) * (out - z_old)
 
         return x, z, t, out
+
+
+class AnalysisLayer(UnrolledLayer):
+
+    def __init__(self, n_components, kernel_size, n_channels, lmbd,
+                 device, dtype, random_state, D_shared=None):
+
+        super().__init__(
+            n_components,
+            kernel_size,
+            n_channels,
+            lmbd,
+            device,
+            dtype,
+            random_state,
+            D_shared
+        )
+
+    def forward(self, x, u):
+
+        step = 1. / self.compute_lipschitz()
+
+        result1 = x - step * self.convt(u, self.parameter)
+        result2 = u + self.conv(result1, self.parameter)
+        out_u = torch.clip(result2, -self.lmbd / step, self.lmbd / step)
+
+        return x, out_u

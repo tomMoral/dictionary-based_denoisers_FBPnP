@@ -10,7 +10,7 @@ class SLS(torch.optim.Optimizer):
         lr=1.,
         beta=0.5,
         tolerance=1e-8,
-        scale_step=True
+        scale_step=True,
     ):
 
         defaults = {
@@ -18,7 +18,7 @@ class SLS(torch.optim.Optimizer):
             "c_constant": c,
             "beta_constant": beta,
             "tolerance": tolerance,
-            "scale_step": scale_step
+            "scale_step": scale_step,
         }
 
         super().__init__(
@@ -30,9 +30,8 @@ class SLS(torch.optim.Optimizer):
 
     def step(self, closure):
 
-        init_loss = closure()
-
         with torch.no_grad():
+            init_loss = closure()
 
             for group in self.param_groups:
 
@@ -54,12 +53,16 @@ class SLS(torch.optim.Optimizer):
                     )
                 )
 
+                if norm_grad == 0:
+                    current_cost = init_loss
+                    break
+
                 if group["scale_step"] and self.init_step:
 
                     group["lr"] *= torch.sqrt(norm_params / norm_grad)
                     self.init_step = False
 
-                eta = group["lr"]
+                eta = group["lr"].clone()
 
                 # Learning step v
                 for param in group["params"]:

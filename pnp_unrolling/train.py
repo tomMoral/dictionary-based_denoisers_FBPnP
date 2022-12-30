@@ -4,7 +4,14 @@ import torch.nn as nn
 from tqdm import tqdm
 
 
-def train_loop(dataloader, model, loss_fn, optimizer, max_batch=None):
+def train_loop(
+    dataloader,
+    model,
+    loss_fn,
+    optimizer,
+    max_batch=None,
+    scheduler=None
+):
     avg_loss = 0
     count = 0
     for batch, (X, y) in enumerate(dataloader):
@@ -15,12 +22,16 @@ def train_loop(dataloader, model, loss_fn, optimizer, max_batch=None):
         count += 1
 
         def closure():
-            return loss_fn(model(X), y)
+            with torch.no_grad():
+                return loss_fn(model(X), y)
 
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
         optimizer.step(closure)
+
+        if scheduler is not None:
+            scheduler.step()
 
         if max_batch is not None and batch >= max_batch:
             break
@@ -98,7 +109,8 @@ def train(
             model,
             loss_fn,
             optimizer,
-            max_batch=max_batch
+            max_batch=max_batch,
+            scheduler=scheduler
         )
         test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
 
@@ -110,9 +122,6 @@ def train(
             f" - Average train loss: {train_loss:.8f}"
             f" - Average test loss: {test_loss:.8f}"
         )
-
-        if scheduler is not None:
-            scheduler.step()
 
     print("Done")
     return train_losses, test_losses

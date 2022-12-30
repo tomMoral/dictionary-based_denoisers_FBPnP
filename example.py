@@ -2,61 +2,40 @@
 import matplotlib.pyplot as plt
 import torch
 
-from torch.optim import Adam
-from torch.optim.lr_scheduler import ExponentialLR
-
-from pnp_unrolling.models import SynthesisUnrolled
-from pnp_unrolling.datasets import create_imagewoof_dataloader
-from pnp_unrolling.train import train
-# from pnp_unrolling.optimizers import SLS
+from pnp_unrolling.unrolled_cdl import UnrolledCDL
 
 
 PATH_DATA = "/storage/store2/work/bmalezie/imagewoof/"
 COLOR = True
-DEVICE = "cuda:0"
+DEVICE = "cuda:3"
+
+# %%
 
 
 params_model = {
     "n_layers": 20,
-    "n_components": 300,
-    "kernel_size": 10,
-    "lmbd": 1e-2,
-    "n_channels": 3 if COLOR else 1,
+    "n_components": 50,
+    "kernel_size": 5,
+    "lmbd": 1e-3,
+    "color": COLOR,
     "device": DEVICE,
     "dtype": torch.float,
-    "avg": False,
-    "D_shared": True
-}
-
-params_dataloader = {
+    "D_shared": True,
+    "optimizer": "adam",
     "path_data": PATH_DATA,
-    "sigma_noise": 0.1,
-    "device": DEVICE,
-    "dtype": torch.float,
-    "mini_batch_size": 10,
-    "color": COLOR
+    "sigma_noise": 0.05,
+    "mini_batch_size": 1,
+    "max_batch": 10,
+    "epochs": 50,
+    "type_unrolling": "analysis"
 }
 
-# %%
 
-unrolled_net = SynthesisUnrolled(**params_model)
-train_dataloader = create_imagewoof_dataloader(
-    **params_dataloader,
-    train=True
-)
-test_dataloader = create_imagewoof_dataloader(
-    **params_dataloader,
-    train=False,
-)
-
-optimizer = Adam(unrolled_net.parameters(), lr=0.1)
-# optimizer = SLS(unrolled_net.parameters(), lr=0.1)
-scheduler = ExponentialLR(optimizer, gamma=0.9)
-
+unrolled_cdl = UnrolledCDL(**params_model)
 
 # %%
-img_noise, img = next(iter(train_dataloader))
-img_result = unrolled_net(img_noise).to("cpu").detach().numpy()
+img_noise, img = next(iter(unrolled_cdl.train_dataloader))
+img_result = unrolled_cdl.unrolled_net(img_noise).to("cpu").detach().numpy()
 
 fig, axs = plt.subplots(1, 3)
 
@@ -74,16 +53,7 @@ axs[2].set_axis_off()
 plt.tight_layout()
 
 # %%
-
-train_loss, test_loss = train(
-    unrolled_net,
-    train_dataloader,
-    test_dataloader,
-    optimizer,
-    scheduler,
-    epochs=50,
-    max_batch=20
-)
+unrolled_net, train_loss, test_loss = unrolled_cdl.fit()
 # %%
 
 plt.clf()
