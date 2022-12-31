@@ -5,6 +5,7 @@ from .models import UnrolledNet
 from .datasets import create_imagewoof_dataloader
 from .optimizers import SLS
 from .train import train
+from tqdm import tqdm
 
 
 class UnrolledCDL:
@@ -127,3 +128,58 @@ class UnrolledCDL:
         )
 
         return self.unrolled_net, train_losses, test_losses
+
+    def predict(self, x, blurr, step=1., n_iter=100, img_test=None):
+
+        conv = torch.nn.functional.conv2d
+        convt = torch.nn.functional.conv_transpose2d
+
+        if type(blurr) == np.ndarray:
+            blurr = torch.tensor(
+                blurr,
+                device=self.device,
+                dtype=self.dtype
+            )
+
+        if type(x) == np.ndarray:
+            x = torch.tensor(
+                x,
+                device=self.device,
+                dtype=self.dtype
+            )
+
+        out = conv(
+            x.transpose(0, 1),
+            blurr
+        ).transpose(0, 1)
+
+        pbar = tqdm(range(n_iter))
+        loss = torch.nn.MSELoss()
+
+        if img_test is not None:
+            psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
+            pbar.set_description(
+                f"Initialisation"
+                f" - PSNR: {psnr:.4f}"
+            )
+
+        for i in pbar:
+
+            result1 = convt(out.transpose(0, 1), blurr).transpose(0, 1) - x
+            result2 = conv(
+                result1.transpose(0, 1),
+                blurr
+            ).transpose(0, 1)
+            with torch.no_grad():
+                out_old = out.clone()
+                out = self.unrolled_net(out - step * result2)
+
+            if img_test is not None:
+                psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
+                pbar.set_description(
+                    f"Iteration {i + 1}"
+                    f" - PSNR: {psnr:.4f}"
+                    f" - diff: {loss(out, out_old)}"
+                )
+
+        return out
