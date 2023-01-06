@@ -27,7 +27,8 @@ params_model = {
     "mini_batch_size": 1,
     "max_batch": 10,
     "epochs": 50,
-    "type_unrolling": "analysis"
+    "type_unrolling": "analysis",
+    "avg": True
 }
 
 
@@ -125,7 +126,7 @@ blurred_img_display = torch.nn.functional.conv2d(
 ).transpose(1, 0)
 
 # %%
-out = unrolled_cdl.predict(blurred_img, blurr, n_iter=100, img_test=img)
+out, _ = unrolled_cdl.predict(blurred_img, blurr, n_iter=100, img_test=img)
 
 
 # %%

@@ -15,7 +15,7 @@ def create_imagewoof_dataloader(
     train=True,
     random_state=2147483647,
     color=False,
-    download=False
+    download=False,
 ):
     """
     Create dataset from ImageWoof
@@ -56,7 +56,7 @@ def create_imagewoof_dataloader(
             dtype=dtype,
             train=True,
             random_state=random_state,
-            color=color
+            color=color,
         ),
         batch_size=mini_batch_size,
         shuffle=True,
@@ -157,8 +157,10 @@ class ImageWoofDataset(torch.utils.data.Dataset):
         )
         noise *= self.sigma_noise
 
-        return (torch.clip(tensor_image + noise, 0, 1)[:, :160, :160],
-                tensor_image[:, :160, :160])
+        img_noise = torch.clip(tensor_image + noise, 0, 1)[:, :160, :160]
+        img_clip = tensor_image[:, :160, :160]
+
+        return img_noise, img_clip
 
     def __len__(self):
 

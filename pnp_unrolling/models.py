@@ -121,22 +121,13 @@ class UnrolledNet(nn.Module):
         """
         Compute the Lipschitz constant using the FFT.
         """
-        fourier_dictionary = fft.fftn(self.parameter, axis=(2, 3))
-        lipschitz = (
-            torch.max(
-                torch.max(
-                    torch.real(
-                        fourier_dictionary * torch.conj(fourier_dictionary)
-                    ),
-                    dim=3,
-                )[0],
-                dim=2,
-            )[0]
-            .sum()
-            .item()
-        )
+        fourier_dico = fft.fftn(self.parameter, dim=(1, 2, 3))
+        lipschitz = torch.amax(
+            torch.real(fourier_dico * torch.conj(fourier_dico)),
+            dim=(1, 2, 3)
+        ).sum().item()
         if lipschitz == 0:
-            lipschitz = 1.0
+            lipschitz = 1
         return lipschitz
 
     def forward(self, x):
@@ -226,22 +217,13 @@ class UnrolledLayer(nn.Module):
         """
         Compute the Lipschitz constant using the FFT.
         """
-        fourier_dictionary = fft.fftn(self.parameter, axis=(2, 3))
-        lipschitz = (
-            torch.max(
-                torch.max(
-                    torch.real(
-                        fourier_dictionary * torch.conj(fourier_dictionary)
-                    ),
-                    dim=3,
-                )[0],
-                dim=2,
-            )[0]
-            .sum()
-            .item()
-        )
+        fourier_dico = fft.fftn(self.parameter, dim=(1, 2, 3))
+        lipschitz = torch.amax(
+            torch.real(fourier_dico * torch.conj(fourier_dico)),
+            dim=(1, 2, 3)
+        ).sum().item()
         if lipschitz == 0:
-            lipschitz = 1.0
+            lipschitz = 1
         return lipschitz
 
     def forward(self, x):

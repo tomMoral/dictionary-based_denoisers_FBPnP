@@ -32,6 +32,7 @@ class UnrolledCDL:
         random_state=2147483647,
         window=False,
         D_shared=False,
+        avg=True
     ):
 
         self.mini_batch_size = mini_batch_size
@@ -45,6 +46,7 @@ class UnrolledCDL:
         self.path_data = path_data
         self.sigma_noise = sigma_noise
         self.download = download
+        self.avg = avg
 
         n_channels = 3 if color else 1
         self.color = color
@@ -58,7 +60,8 @@ class UnrolledCDL:
             lmbd,
             device,
             dtype,
-            type_layer=type_unrolling
+            type_layer=type_unrolling,
+            avg=avg
         )
 
         # Optimizer
@@ -83,7 +86,7 @@ class UnrolledCDL:
             train=True,
             random_state=self.random_state,
             color=self.color,
-            download=self.download
+            download=self.download,
         )
 
         self.test_dataloader = create_imagewoof_dataloader(
@@ -94,7 +97,7 @@ class UnrolledCDL:
             mini_batch_size=self.mini_batch_size,
             train=False,
             random_state=self.random_state,
-            color=self.color
+            color=self.color,
         )
 
         # LR scheduler
@@ -156,12 +159,15 @@ class UnrolledCDL:
         pbar = tqdm(range(n_iter))
         loss = torch.nn.MSELoss()
 
+        psnrs = []
+
         if img_test is not None:
             psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
             pbar.set_description(
                 f"Initialisation"
                 f" - PSNR: {psnr:.4f}"
             )
+            psnrs.append(psnr.item())
 
         for i in pbar:
 
@@ -181,5 +187,6 @@ class UnrolledCDL:
                     f" - PSNR: {psnr:.4f}"
                     f" - diff: {loss(out, out_old)}"
                 )
+                psnrs.append(psnr.item())
 
-        return out
+        return out, psnrs
