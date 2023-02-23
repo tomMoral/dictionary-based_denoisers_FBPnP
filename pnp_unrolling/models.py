@@ -47,7 +47,8 @@ class UnrolledNet(nn.Module):
         type_layer="synthesis",
         random_state=2147483647,
         avg=False,
-        D_shared=True
+        D_shared=True,
+        activation="soft-thresholding"
     ):
 
         super().__init__()
@@ -77,6 +78,7 @@ class UnrolledNet(nn.Module):
             )
         )
 
+        self.D_shared = D_shared
         if D_shared:
             D_init = self.parameter
 
@@ -96,6 +98,7 @@ class UnrolledNet(nn.Module):
                     device,
                     dtype,
                     random_state,
+                    activation=activation,
                     D_shared=D_init
                 ) for i in range(n_layers)]
             )
@@ -111,11 +114,27 @@ class UnrolledNet(nn.Module):
                     device,
                     dtype,
                     random_state,
+                    activation=activation,
                     D_shared=D_init
                 ) for i in range(n_layers)]
             )
 
         self.convt = F.conv_transpose2d
+
+    def set_lmbd(self, lmbd):
+        with torch.no_grad():
+            for layer in self.model:
+                layer.lmbd = lmbd
+
+    def rescale(self):
+        """
+        Rescale all parameters
+        """
+        with torch.no_grad():
+            if not self.D_shared:
+                for layer in self.model:
+                    layer.rescale()
+            self.parameter /= np.sqrt(self.compute_lipschitz())
 
     def compute_lipschitz(self):
         """
@@ -130,7 +149,7 @@ class UnrolledNet(nn.Module):
             lipschitz = 1
         return lipschitz
 
-    def forward(self, x):
+    def forward(self, x, out=None):
 
         if self.avg:
             current_avg = torch.mean(x, axis=(2, 3), keepdim=True)
@@ -139,14 +158,15 @@ class UnrolledNet(nn.Module):
         else:
             x_avg = x
 
-        out = torch.zeros(
-            (x.shape[0],
-             self.n_components,
-             x.shape[2] - self.kernel_size + 1,
-             x.shape[3] - self.kernel_size + 1),
-            dtype=self.dtype,
-            device=self.device
-        )
+        if out is None:
+            out = torch.zeros(
+                (x.shape[0],
+                 self.n_components,
+                 x.shape[2] - self.kernel_size + 1,
+                 x.shape[3] - self.kernel_size + 1),
+                dtype=self.dtype,
+                device=self.device
+            )
 
         out_old = out.clone()
         t_old = 1.
@@ -155,25 +175,25 @@ class UnrolledNet(nn.Module):
             for layer in self.model:
                 x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
 
-            out = self.convt(out, self.parameter)
+            reconstruction = self.convt(out, self.parameter)
 
         elif self.type_layer == "analysis":
             for layer in self.model:
                 x_avg, out = layer(x_avg, out)
 
             step = 1. / self.compute_lipschitz()
-            out = x_avg - step * self.convt(out, self.parameter)
+            reconstruction = x_avg - step * self.convt(out, self.parameter)
 
         if self.avg:
-            out = out * current_std + current_avg
+            reconstruction = reconstruction * current_std + current_avg
 
-        return torch.clip(out, 0, 1)
+        return torch.clip(reconstruction, 0, 1), out
 
 
 class UnrolledLayer(nn.Module):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, D_shared=None):
+                 device, dtype, random_state, activation, D_shared=None):
 
         super().__init__()
 
@@ -184,6 +204,7 @@ class UnrolledLayer(nn.Module):
         self.dtype = dtype
         self.device = device
         self.random_state = random_state
+        self.activation = activation
 
         self.generator = torch.Generator(self.device)
         self.generator.manual_seed(random_state)
@@ -213,6 +234,12 @@ class UnrolledLayer(nn.Module):
         self.conv = F.conv2d
         self.convt = F.conv_transpose2d
 
+    def rescale(self):
+        """
+        Rescale the parameter
+        """
+        self.parameter /= np.sqrt(self.compute_lipschitz())
+
     def compute_lipschitz(self):
         """
         Compute the Lipschitz constant using the FFT.
@@ -234,7 +261,7 @@ class UnrolledLayer(nn.Module):
 class SynthesisLayer(UnrolledLayer):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, D_shared=None):
+                 device, dtype, random_state, activation, D_shared=None):
 
         super().__init__(
             n_components,
@@ -244,6 +271,7 @@ class SynthesisLayer(UnrolledLayer):
             device,
             dtype,
             random_state,
+            activation,
             D_shared
         )
 
@@ -260,11 +288,14 @@ class SynthesisLayer(UnrolledLayer):
         out = z - step * result2
         # thresh = torch.abs(out) - step * self.lmbd
         # out = torch.sign(out) * F.relu(thresh)
-        out = out - torch.clip(
-            out,
-            -step * self.lmbd,
-            step * self.lmbd
-        )
+        if self.activation == "soft-thresholding":
+            out = out - torch.clip(
+                out,
+                -step * self.lmbd,
+                step * self.lmbd
+            )
+        elif self.activation == "hard-thresholding":
+            out = torch.clip(out, -self.lmbd, self.lmbd)
 
         # FISTA
         t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
@@ -276,7 +307,7 @@ class SynthesisLayer(UnrolledLayer):
 class AnalysisLayer(UnrolledLayer):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, D_shared=None):
+                 device, dtype, random_state, activation, D_shared=None):
 
         super().__init__(
             n_components,
@@ -286,6 +317,7 @@ class AnalysisLayer(UnrolledLayer):
             device,
             dtype,
             random_state,
+            activation,
             D_shared
         )
 

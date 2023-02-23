@@ -8,7 +8,8 @@ from PIL import Image
 
 def create_imagewoof_dataloader(
     path_data,
-    sigma_noise,
+    max_sigma_noise,
+    min_sigma_noise,
     device,
     dtype,
     mini_batch_size=10,
@@ -16,6 +17,7 @@ def create_imagewoof_dataloader(
     random_state=2147483647,
     color=False,
     download=False,
+    fixed_noise=False
 ):
     """
     Create dataset from ImageWoof
@@ -51,12 +53,14 @@ def create_imagewoof_dataloader(
     return torch.utils.data.DataLoader(
         ImageWoofDataset(
             path_data,
-            sigma_noise,
+            max_sigma_noise,
+            min_sigma_noise,
             device=device,
             dtype=dtype,
             train=True,
             random_state=random_state,
             color=color,
+            fixed_noise=fixed_noise
         ),
         batch_size=mini_batch_size,
         shuffle=True,
@@ -118,16 +122,18 @@ def download_imagewoof(path):
 
 class ImageWoofDataset(torch.utils.data.Dataset):
 
-    def __init__(self, path, sigma_noise, device, dtype,
-                 random_state=2645982315, train=True,
-                 color=True):
+    def __init__(self, path, max_sigma_noise, min_sigma_noise,
+                 device, dtype, random_state=2645982315, train=True,
+                 color=True, fixed_noise=False):
 
         super().__init__()
         self.device = device
         self.dtype = dtype
-        self.sigma_noise = sigma_noise
+        self.max_sigma_noise = max_sigma_noise
+        self.min_sigma_noise = min_sigma_noise
         self.generator = torch.Generator(self.device)
         self.generator.manual_seed(random_state)
+        self.fixed_noise = fixed_noise
         self.color = color
         self.files = []
         for root, _, files in os.walk(path):
@@ -155,7 +161,17 @@ class ImageWoofDataset(torch.utils.data.Dataset):
             dtype=self.dtype,
             device=self.device
         )
-        noise *= self.sigma_noise
+        if not self.fixed_noise:
+            scale = torch.rand(
+                1,
+                generator=self.generator,
+                dtype=self.dtype,
+                device=self.device
+            )
+        else:
+            scale = 1.
+        max_diff = (self.max_sigma_noise - self.min_sigma_noise)
+        noise *= scale * max_diff + self.min_sigma_noise
 
         img_noise = torch.clip(tensor_image + noise, 0, 1)[:, :160, :160]
         img_clip = tensor_image[:, :160, :160]

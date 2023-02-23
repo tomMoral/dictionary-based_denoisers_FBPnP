@@ -1,4 +1,9 @@
-#VSCode
+# Folders
+figures
+results
+checkpoint
+
+# VSCode
 .vscode
 
 # tmp

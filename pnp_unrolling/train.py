@@ -10,25 +10,29 @@ def train_loop(
     loss_fn,
     optimizer,
     max_batch=None,
-    scheduler=None
+    scheduler=None,
+    rescale=False
 ):
     avg_loss = 0
     count = 0
     for batch, (X, y) in enumerate(dataloader):
         # Compute prediction and loss
-        pred = model(X)
+        pred, _ = model(X)
         loss = loss_fn(pred, y)
         avg_loss += loss.item()
         count += 1
 
         def closure():
             with torch.no_grad():
-                return loss_fn(model(X), y)
+                return loss_fn(model(X)[0], y)
 
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
         optimizer.step(closure)
+
+        if rescale:
+            model.rescale()
 
         if scheduler is not None:
             scheduler.step()
@@ -45,7 +49,7 @@ def test_loop(dataloader, model, loss_fn, max_batch):
 
     with torch.no_grad():
         for batch, (X, y) in enumerate(dataloader):
-            pred = model(X)
+            pred, _ = model(X)
             test_loss += loss_fn(pred, y).item()
             count += 1
             if max_batch is not None and batch >= max_batch:
@@ -62,7 +66,8 @@ def train(
     optimizer,
     scheduler=None,
     epochs=10,
-    max_batch=None
+    max_batch=None,
+    rescale=False
 ):
     """
     Training process
@@ -110,7 +115,8 @@ def train(
             loss_fn,
             optimizer,
             max_batch=max_batch,
-            scheduler=scheduler
+            scheduler=scheduler,
+            rescale=rescale
         )
         test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
 

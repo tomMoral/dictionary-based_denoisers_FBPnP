@@ -18,7 +18,8 @@ class UnrolledCDL:
         path_data,
         color=True,
         download=False,
-        sigma_noise=0.1,
+        max_sigma_noise=0.1,
+        min_sigma_noise=0.,
         type_unrolling="synthesis",
         n_layers=20,
         epochs=20,
@@ -32,7 +33,10 @@ class UnrolledCDL:
         random_state=2147483647,
         window=False,
         D_shared=False,
-        avg=True
+        avg=True,
+        rescale=False,
+        fixed_noise=False,
+        activation="soft-thresholding"
     ):
 
         self.mini_batch_size = mini_batch_size
@@ -44,9 +48,9 @@ class UnrolledCDL:
         self.gamma = gamma
         self.optimizer_name = optimizer
         self.path_data = path_data
-        self.sigma_noise = sigma_noise
         self.download = download
         self.avg = avg
+        self.rescale = rescale
 
         n_channels = 3 if color else 1
         self.color = color
@@ -61,7 +65,9 @@ class UnrolledCDL:
             device,
             dtype,
             type_layer=type_unrolling,
-            avg=avg
+            avg=avg,
+            D_shared=D_shared,
+            activation=activation
         )
 
         # Optimizer
@@ -79,7 +85,8 @@ class UnrolledCDL:
         # Dataloader
         self.train_dataloader = create_imagewoof_dataloader(
             self.path_data,
-            self.sigma_noise,
+            max_sigma_noise,
+            min_sigma_noise,
             self.device,
             self.dtype,
             mini_batch_size=self.mini_batch_size,
@@ -87,17 +94,20 @@ class UnrolledCDL:
             random_state=self.random_state,
             color=self.color,
             download=self.download,
+            fixed_noise=fixed_noise
         )
 
         self.test_dataloader = create_imagewoof_dataloader(
             self.path_data,
-            self.sigma_noise,
+            max_sigma_noise,
+            min_sigma_noise,
             self.device,
             self.dtype,
             mini_batch_size=self.mini_batch_size,
             train=False,
             random_state=self.random_state,
             color=self.color,
+            fixed_noise=fixed_noise
         )
 
         # LR scheduler
@@ -127,12 +137,17 @@ class UnrolledCDL:
             self.optimizer,
             scheduler=self.scheduler,
             epochs=self.epochs,
-            max_batch=self.max_batch
+            max_batch=self.max_batch,
+            rescale=self.rescale
         )
 
         return self.unrolled_net, train_losses, test_losses
 
-    def predict(self, x, blurr, step=1., n_iter=100, img_test=None):
+    def set_lmbd(self, lmbd):
+        self.unrolled_net.set_lmbd(lmbd)
+
+    def predict(self, x, blurr, step=1., n_iter=100,
+                img_test=None, regul=True):
 
         conv = torch.nn.functional.conv2d
         convt = torch.nn.functional.conv_transpose2d
@@ -151,42 +166,48 @@ class UnrolledCDL:
                 dtype=self.dtype
             )
 
-        out = conv(
-            x.transpose(0, 1),
-            blurr
-        ).transpose(0, 1)
-
-        pbar = tqdm(range(n_iter))
-        loss = torch.nn.MSELoss()
-
-        psnrs = []
-
-        if img_test is not None:
-            psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
-            pbar.set_description(
-                f"Initialisation"
-                f" - PSNR: {psnr:.4f}"
-            )
-            psnrs.append(psnr.item())
-
-        for i in pbar:
-
-            result1 = convt(out.transpose(0, 1), blurr).transpose(0, 1) - x
-            result2 = conv(
-                result1.transpose(0, 1),
+        with torch.no_grad():
+            out = conv(
+                x.transpose(0, 1),
                 blurr
             ).transpose(0, 1)
-            with torch.no_grad():
-                out_old = out.clone()
-                out = self.unrolled_net(out - step * result2)
+
+            pbar = tqdm(range(n_iter))
+            loss = torch.nn.MSELoss()
+            psnrs = []
 
             if img_test is not None:
                 psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
                 pbar.set_description(
-                    f"Iteration {i + 1}"
+                    f"Initialisation"
                     f" - PSNR: {psnr:.4f}"
-                    f" - diff: {loss(out, out_old)}"
                 )
                 psnrs.append(psnr.item())
 
-        return out, psnrs
+            for i in pbar:
+
+                result1 = convt(out.transpose(0, 1), blurr).transpose(0, 1) - x
+                result2 = conv(
+                    result1.transpose(0, 1),
+                    blurr
+                ).transpose(0, 1)
+
+                out_old = out.clone()
+                if regul:
+                    out = self.unrolled_net(out - step * result2)
+                else:
+                    out = out - step * result2
+
+                if img_test is not None:
+                    psnr = 10 * torch.log(1 / loss(out, img_test)) / np.log(10)
+                    diff = loss(out, out_old)
+                    pbar.set_description(
+                        f"Iteration {i + 1}"
+                        f" - PSNR: {psnr:.4f}"
+                        f" - diff: {diff.item():.4f}"
+                    )
+                    psnrs.append(psnr.item())
+                    if diff < 1e-15:
+                        break
+
+            return out, psnrs
