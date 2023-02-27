@@ -4,6 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft as fft
 
+from .dfb_net import DFBNetconst
+from .utils import init_params
+
 
 class UnrolledNet(nn.Module):
     """
@@ -48,7 +51,8 @@ class UnrolledNet(nn.Module):
         random_state=2147483647,
         avg=False,
         D_shared=True,
-        activation="soft-thresholding"
+        activation="soft-thresholding",
+        init_dual=True
     ):
 
         super().__init__()
@@ -58,6 +62,7 @@ class UnrolledNet(nn.Module):
         self.n_components = n_components
         self.kernel_size = kernel_size
         self.avg = avg
+        self.lmbd = lmbd
 
         self.shape_params = (
             self.n_components,
@@ -69,21 +74,24 @@ class UnrolledNet(nn.Module):
         self.generator = torch.Generator(self.device)
         self.generator.manual_seed(random_state)
 
-        self.parameter = nn.Parameter(
-            torch.rand(
+        self.init_dual = init_dual
+
+        if type_layer in ["analysis", "synthesis"]:
+
+            self.parameter = init_params(
                 self.shape_params,
-                generator=self.generator,
-                dtype=self.dtype,
-                device=self.device,
+                self.generator,
+                self.dtype,
+                self.device,
+                type_layer
             )
-        )
 
-        self.D_shared = D_shared
-        if D_shared:
-            D_init = self.parameter
+            self.D_shared = D_shared
+            if D_shared:
+                D_init = self.parameter
 
-        else:
-            D_init = None
+            else:
+                D_init = None
 
         self.type_layer = type_layer
 
@@ -119,12 +127,27 @@ class UnrolledNet(nn.Module):
                 ) for i in range(n_layers)]
             )
 
+        elif self.type_layer == "dfb_net":
+
+            self.model = DFBNetconst(
+                device=device,
+                dtype=dtype,
+                num_of_layers=n_layers,
+                channels=n_channels,
+                features=n_components,
+                padding=0,
+                kernel_size=self.kernel_size
+            )
+
         self.convt = F.conv_transpose2d
+        self.conv = F.conv2d
 
     def set_lmbd(self, lmbd):
-        with torch.no_grad():
-            for layer in self.model:
-                layer.lmbd = lmbd
+        if self.type_layer != "dfb_net":
+            with torch.no_grad():
+                for layer in self.model:
+                    layer.lmbd = lmbd
+        self.lmbd = lmbd
 
     def rescale(self):
         """
@@ -158,31 +181,57 @@ class UnrolledNet(nn.Module):
         else:
             x_avg = x
 
-        if out is None:
-            out = torch.zeros(
-                (x.shape[0],
-                 self.n_components,
-                 x.shape[2] - self.kernel_size + 1,
-                 x.shape[3] - self.kernel_size + 1),
-                dtype=self.dtype,
-                device=self.device
-            )
-
-        out_old = out.clone()
-        t_old = 1.
-
         if self.type_layer == "synthesis":
+
+            if out is None:
+                out = torch.zeros(
+                    (x.shape[0],
+                     self.n_components,
+                     x.shape[2] - self.kernel_size + 1,
+                     x.shape[3] - self.kernel_size + 1),
+                    dtype=self.dtype,
+                    device=self.device
+                )
+
+            out_old = out.clone()
+            t_old = 1.
+
             for layer in self.model:
                 x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
 
             reconstruction = self.convt(out, self.parameter)
 
         elif self.type_layer == "analysis":
+
+            if out is None and self.init_dual:
+                out = self.conv(x_avg, self.parameter)
+
+            elif out is None:
+                out = torch.zeros(
+                    (x.shape[0],
+                     self.n_components,
+                     x.shape[2] - self.kernel_size + 1,
+                     x.shape[3] - self.kernel_size + 1),
+                    dtype=self.dtype,
+                    device=self.device
+                )
+
             for layer in self.model:
                 x_avg, out = layer(x_avg, out)
 
-            step = 1. / self.compute_lipschitz()
-            reconstruction = x_avg - step * self.convt(out, self.parameter)
+            # step = 1. / self.compute_lipschitz()
+            # reconstruction = x_avg - step * self.convt(out, self.parameter)
+
+            reconstruction = x_avg - self.convt(out, self.parameter)
+
+        elif self.type_layer == "dfb_net":
+
+            reconstruction, out = self.model(
+                x_avg,
+                x_avg,
+                self.lmbd,
+                u=out,
+            )
 
         if self.avg:
             reconstruction = reconstruction * current_std + current_avg
@@ -193,7 +242,8 @@ class UnrolledNet(nn.Module):
 class UnrolledLayer(nn.Module):
 
     def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, activation, D_shared=None):
+                 device, dtype, random_state, activation, type_layer,
+                 D_shared=None):
 
         super().__init__()
 
@@ -218,13 +268,12 @@ class UnrolledLayer(nn.Module):
 
         if D_shared is None:
 
-            self.parameter = nn.Parameter(
-                torch.rand(
-                    self.shape_params,
-                    generator=self.generator,
-                    dtype=self.dtype,
-                    device=self.device,
-                )
+            self.parameter = init_params(
+                self.shape_params,
+                self.generator,
+                self.dtype,
+                self.device,
+                type_layer
             )
 
         else:
@@ -272,6 +321,7 @@ class SynthesisLayer(UnrolledLayer):
             dtype,
             random_state,
             activation,
+            "synthesis",
             D_shared
         )
 
@@ -318,15 +368,24 @@ class AnalysisLayer(UnrolledLayer):
             dtype,
             random_state,
             activation,
+            "analysis",
             D_shared
         )
 
     def forward(self, x, u):
 
-        step = 1. / self.compute_lipschitz()
+        # step = 1. / self.compute_lipschitz()
 
-        result1 = x - step * self.convt(u, self.parameter)
-        result2 = u + self.conv(result1, self.parameter)
-        out_u = torch.clip(result2, -self.lmbd / step, self.lmbd / step)
+        # result1 = x - step * self.convt(u, self.parameter)
+        # result2 = u + self.conv(result1, self.parameter)
+        # out_u = torch.clip(result2, -self.lmbd / step, self.lmbd / step)
+
+        gamma = 1.8 / self.compute_lipschitz()
+        tmp = x - self.convt(u, self.parameter)
+        g1 = u + gamma * self.conv(tmp, self.parameter)
+        out_u = g1 - gamma * (
+            F.relu(g1 / gamma - self.lmbd / gamma)
+            - F.relu(- g1 / gamma - self.lmbd / gamma)
+        )
 
         return x, out_u

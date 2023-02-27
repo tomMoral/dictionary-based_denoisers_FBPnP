@@ -20,6 +20,7 @@ class UnrolledCDL:
         download=False,
         max_sigma_noise=0.1,
         min_sigma_noise=0.,
+        std_noise=None,
         type_unrolling="synthesis",
         n_layers=20,
         epochs=20,
@@ -81,6 +82,10 @@ class UnrolledCDL:
                 self.unrolled_net.parameters(),
                 lr=lr
             )
+
+        if fixed_noise and std_noise is not None:
+            max_sigma_noise = std_noise
+            min_sigma_noise = std_noise
 
         # Dataloader
         self.train_dataloader = create_imagewoof_dataloader(

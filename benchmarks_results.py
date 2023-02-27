@@ -1,43 +1,50 @@
 # %%
 import matplotlib.pyplot as plt
 import pandas as pd
-import numpy as np
 
 import matplotlib.colors as mcolors
-
 # %%
-data = pd.read_csv("results/results_pnp.csv")
+data = pd.read_csv("results/results_pnp_fixed_noise.csv")
 # %%
 data.head()
 
 # %%
 
+lmbd = data["lmbd"].unique()[1]
+std_noise = data["std_noise"].unique()[0]
 
-
-noise_value = data["std_noise"].unique()[0]
-
-combinations_params = [(True, False), (True, True), (False, True), (False, False)]
-
+combinations_params = [
+    (True, True, True),
+    (True, True, False),
+    (True, False, True),
+    (True, False, False),
+    (False, True, True),
+    (False, True, False),
+    (False, False, True),
+    (False, False, False),
+]
 
 # %%
 
-fig, axs = plt.subplots(len(combinations_params), 3, figsize=(15, 12))
+fig, axs = plt.subplots(len(combinations_params), 3, figsize=(12, 16))
 
 dico_legend = {}
 for model in data["model"].unique():
     dico_legend[model] = None
 
 for j, current_tuple in enumerate(combinations_params):
-    update_dual, shared = current_tuple
+    update_dual, D_shared, avg = current_tuple
     for i, metric in enumerate(["psnr", "ssim", "conv"]):
         for l, model in enumerate(data["model"].unique()):
             for image_num in data["images"].unique():
                 current_data = data[
                     (data["model"] == model)
-                    & (data["std_noise"] == noise_value)
+                    & (data["lmbd"] == lmbd)
                     & (data["images"] == image_num)
-                    & (data["shared"] == shared)
+                    & (data["D_shared"] == D_shared)
                     & (data["update_dual"] == update_dual)
+                    & (data["avg"] == avg)
+                    & (data["std_noise"] == std_noise)
                 ]
 
                 line, = axs[j, i].plot(
@@ -62,12 +69,17 @@ for j, current_tuple in enumerate(combinations_params):
         axs[j, i].set_xlabel("Reg value")
         axs[j, i].set_ylabel(metric)
         axs[j, i].set_xscale("log")
-        axs[j, i].set_title(f"Warm restart: {update_dual}, Shared params {shared}")
+        axs[j, i].set_title(
+            f"Warm restart: {update_dual}\n"
+            f"Shared params: {D_shared}\n"
+            f"Rescaling: {avg}"
+        )
 
 axs[j, i].legend(
     list(dico_legend.values()),
     list(dico_legend.keys())
 )
 plt.tight_layout()
-plt.savefig(f"figures/pnp_benchmark_unrolled_general_{noise_value}.pdf")
+plt.savefig(f"figures/pnp_benchmark_unrolled_std_noise_{std_noise}_lmbd_{lmbd}.pdf")
+print(f"figures/pnp_benchmark_unrolled_std_noise_{std_noise}_lmbd_{lmbd}.pdf")
 # %%

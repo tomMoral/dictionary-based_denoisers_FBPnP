@@ -21,13 +21,23 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 PATH_DATA = "/storage/store2/work/bmalezie/imagewoof/"
 COLOR = False
-DEVICE = "cuda:2"
-STD_NOISE = 0.05
+DEVICE = "cuda:3"
 mem = Memory(location='./tmp_benchmark_pnp/', verbose=0)
-N_EXP = 5
+N_EXP = 1
 
 
-def load_nets(reg=0.1):
+PARAMS_UNROLLED = {
+    "n_layers": [20],
+    "n_components": [50],
+    "kernel_size": [5],
+    "avg": [True, False],
+    "D_shared": [True, False],
+    "lmbd": np.logspace(-5, -2, num=4),
+    "std_noise": [0.02, 0.05, 0.1]
+}
+
+
+def load_nets(params_unrolled):
     print("Loading drunet...")
     net = UNetRes(
         in_nc=1 + 1,
@@ -47,60 +57,60 @@ def load_nets(reg=0.1):
     try:
         net.module.load_state_dict(checkpoint, strict=True)
     except:
-        net.module.load_state_dict(checkpoint.module.state_dict(), strict=True)
+        net.module.load_state_dict(checkpoint.module.state_dict(),
+                                   strict=True)
+
+    keys, values = zip(*params_unrolled.items())
+    permuts_params_unrolled = [
+        dict(zip(keys, v)) for v in itertools.product(*values)
+    ]
 
     params_model = {
-        "n_layers": 20,
-        "n_components": 50,
-        "kernel_size": 5,
-        "lmbd": reg * STD_NOISE,
         "color": COLOR,
         "device": DEVICE,
         "dtype": torch.float,
         "optimizer": "adam",
         "path_data": PATH_DATA,
-        "max_sigma_noise": 0.1,
-        "min_sigma_noise": 0,
         "mini_batch_size": 1,
         "max_batch": 10,
         "epochs": 50,
-        "avg": False,
         "rescale": False,
-        "fixed_noise": False
+        "fixed_noise": True,
     }
 
-    print("Loading unrolled analysis shared")
-    unrolled_cdl_analysis = UnrolledCDL(**params_model,
-                                        type_unrolling="analysis",
-                                        D_shared=True)
-    net_analysis_shared, _, _ = unrolled_cdl_analysis.fit()
+    dico_nets = {}
 
-    print("Loading unrolled analysis")
-    unrolled_cdl_analysis = UnrolledCDL(**params_model,
-                                        type_unrolling="analysis",
-                                        D_shared=False)
-    net_analysis, _, _ = unrolled_cdl_analysis.fit()
+    print("Loading unrolled")
 
-    print("Loading unrolled synthesis shared")
-    unrolled_cdl_synthesis = UnrolledCDL(**params_model,
-                                         type_unrolling="synthesis",
-                                         D_shared=True)
-    net_synthesis_shared, _, _ = unrolled_cdl_synthesis.fit()
+    for param_unrolled in permuts_params_unrolled:
+        print(param_unrolled)
 
-    print("Loading unrolled synthesis")
-    unrolled_cdl_synthesis = UnrolledCDL(**params_model,
-                                         type_unrolling="synthesis",
-                                         D_shared=False)
-    net_synthesis, _, _ = unrolled_cdl_synthesis.fit()
+        signature = ""
+        for key in param_unrolled:
+            signature += f"{key}_{param_unrolled[key]}_"
 
-    return (net,
-            net_analysis,
-            net_synthesis,
-            net_analysis_shared,
-            net_synthesis_shared)
+        unrolled_cdl_analysis = UnrolledCDL(
+            **params_model,
+            **param_unrolled,
+            type_unrolling="analysis"
+        )
+
+        dico_nets[signature + "analysis"], _, _ = unrolled_cdl_analysis.fit()
+
+        unrolled_cdl_synthesis = UnrolledCDL(
+            **params_model,
+            **param_unrolled,
+            type_unrolling="synthesis"
+        )
+
+        dico_nets[signature + "synthesis"], _, _ = unrolled_cdl_synthesis.fit()
+
+    print("Done")
+
+    return net, dico_nets
 
 
-DRUNET, NET_ANALYSIS, NET_SYNTHESIS, NET_ANALYSIS_SHARED, NET_SYNTHESIS_SHARED = load_nets()
+DRUNET, DICO_NETS = load_nets(PARAMS_UNROLLED)
 
 
 def prox_L1(x, tau):
@@ -151,7 +161,7 @@ def apply_model(model, x, dual, reg_par, net=None, update_dual=False):
         return x, None
 
 
-def pnp_deblurring(model, pth_kernel, x_observed, reg_par=0.5 * STD_NOISE,
+def pnp_deblurring(model, pth_kernel, x_observed, reg_par=1e-2,
                    n_iter=50, net=None, update_dual=False):
 
     if model in ["analysis", "synthesis"]:
@@ -188,7 +198,6 @@ def run_test(params):
     std_noise = params["std_noise"]
     n_iter = params["n_iter"]
     update_dual = params["update_dual"]
-    shared = params["shared"]
 
     img = IMAGES[img_num]
 
@@ -201,16 +210,12 @@ def run_test(params):
     nxb, nyb = x_blurred.shape
     x_observed = x_blurred + std_noise * np.random.rand(nxb, nyb)
 
-    if model == "analysis":
-        if shared:
-            net = NET_ANALYSIS_SHARED
-        else:
-            net = NET_ANALYSIS
-    elif model == "synthesis":
-        if shared:
-            net = NET_SYNTHESIS_SHARED
-        else:
-            net = NET_SYNTHESIS
+    if model in ["analysis", "synthesis"]:
+        signature = ""
+        for key in PARAMS_UNROLLED:
+            signature += f"{key}_{params[key]}_"
+        signature += model
+        net = DICO_NETS[signature]
     elif model == "drunet":
         net = DRUNET
     else:
@@ -237,8 +242,8 @@ if __name__ == "__main__":
 
     dataloader = create_imagewoof_dataloader(
         PATH_DATA,
-        min_sigma_noise=STD_NOISE,
-        max_sigma_noise=STD_NOISE,
+        min_sigma_noise=0.1,
+        max_sigma_noise=0.1,
         device=DEVICE,
         dtype=torch.float,
         mini_batch_size=1,
@@ -258,16 +263,16 @@ if __name__ == "__main__":
 
     hyperparams = {
         "images": np.arange(0, N_EXP, 1, dtype=int),
-        "std_noise": [0.02, 0.05],
         "pth_kernel": ['blur_models/blur_3.mat'],
-        "reg_par": np.logspace(-5, 1, num=50),
+        "reg_par": np.logspace(-5, 1, num=20),
         "model": ["identity", "analysis", "synthesis"],
         "n_iter": [500],
         "update_dual": [True, False],
-        "shared": [True, False]
         # "model": ["drunet", "analysis", "synthesis", "wavelet", "identity"],
         # "model": ["bm3d", "drunet", "analysis", "synthesis", "wavelet"],
     }
+
+    hyperparams.update(PARAMS_UNROLLED)
 
     keys, values = zip(*hyperparams.items())
     permuts_params = [dict(zip(keys, v)) for v in itertools.product(*values)]
@@ -276,24 +281,34 @@ if __name__ == "__main__":
 
     for params in tqdm(permuts_params):
         try:
+            # Avoid running again models with useless params
             if params["model"] == "identity":
                 tmp = params["reg_par"]
                 params["reg_par"] = 0
 
             if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
                 tmp_dual = params["update_dual"]
-                tmp_shared = params["shared"]
                 params["update_dual"] = True
-                params["shared"] = True
 
+                tmps = {}
+                for param_unrolled in PARAMS_UNROLLED:
+                    if param_unrolled != "std_noise":
+                        tmps[param_unrolled] = params[param_unrolled]
+                        params[param_unrolled] = 0
+
+            # Run test
             results = run_test(params)
 
+            # Get values back for useless params
             if params["model"] == "identity":
                 params["reg_par"] = tmp
 
             if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
                 params["update_dual"] = tmp_dual
-                params["shared"] = tmp_shared
+
+                for param_unrolled in PARAMS_UNROLLED:
+                    if param_unrolled != "std_noise":
+                        params[param_unrolled] = tmps[param_unrolled]
 
             # Storing results
             for key in params.keys():
@@ -312,4 +327,4 @@ if __name__ == "__main__":
             raise
 
     results = pd.DataFrame(dico_results)
-    results.to_csv(str("results/results_pnp_no_avg.csv"))
+    results.to_csv(str("results/results_pnp_fixed_noise.csv"))

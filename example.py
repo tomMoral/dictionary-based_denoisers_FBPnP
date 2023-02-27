@@ -2,12 +2,19 @@
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-from pnp_unrolling.unrolled_cdl import UnrolledCDL
+import scipy
 
+from tqdm import tqdm
+from pnp_unrolling.unrolled_cdl import UnrolledCDL
+from utils.measurement_tools import get_operators
+from utils.tools import op_norm2
+from pnp_unrolling.datasets import create_imagewoof_dataloader
 
 PATH_DATA = "/storage/store2/work/bmalezie/imagewoof/"
-COLOR = True
+COLOR = False
 DEVICE = "cuda:3"
+reg = 0.5
+STD_NOISE = 0.05
 
 # %%
 
@@ -19,19 +26,19 @@ params_model = {
     "color": COLOR,
     "device": DEVICE,
     "dtype": torch.float,
-    "D_shared": False,
     "optimizer": "adam",
     "path_data": PATH_DATA,
-    "max_sigma_noise": 0.2,
-    "min_sigma_noise": 0.05,
+    "max_sigma_noise": STD_NOISE,
+    "min_sigma_noise": STD_NOISE,
     "mini_batch_size": 1,
     "max_batch": 10,
-    "epochs": 50,
-    "type_unrolling": "analysis",
-    "avg": True,
+    "epochs": 10,
+    "avg": False,
     "rescale": False,
-    "pseudo_gd": False,
-    "fixed_noise": False
+    "fixed_noise": True,
+    "D_shared": False,
+    "type_unrolling": "dfb_net",
+    "lr": 1e-1
 }
 
 
@@ -39,7 +46,8 @@ unrolled_cdl = UnrolledCDL(**params_model)
 
 # %%
 img_noise, img = next(iter(unrolled_cdl.train_dataloader))
-img_result = unrolled_cdl.unrolled_net(img_noise).to("cpu").detach().numpy()
+img_result, _ = unrolled_cdl.unrolled_net(img_noise)
+img_result = img_result.to("cpu").detach().numpy()
 
 fig, axs = plt.subplots(1, 3)
 
@@ -72,7 +80,8 @@ plt.savefig("loss.png")
 # %%
 
 plt.clf()
-img_result = unrolled_net(img_noise).to("cpu").detach().numpy()
+img_result, _ = unrolled_net(img_noise)
+img_result = img_result.to("cpu").detach().numpy()
 
 fig, axs = plt.subplots(1, 3)
 
@@ -88,131 +97,108 @@ axs[1].set_axis_off()
 axs[2].imshow(img_result[0].transpose(1, 2, 0), cmap=cmap)
 axs[2].set_axis_off()
 plt.tight_layout()
-plt.savefig("example.png")
-
+plt.show()
 # %%
 
 
-def gaussian_kernel(dim, sigma):
-    """Generate a 2D gaussian kernel of given size and standard deviation.
+def apply_model(model, x, dual, reg_par, net=None, update_dual=False):
 
-    Parameters
-    ----------
-    dim : int
-        Kernel size
-    sigma : float
-        Kernel standard deviation
+    if model == "unrolled":
+        net.set_lmbd(reg_par)
+        x_torch = torch.tensor(
+            x,
+            device=DEVICE,
+            dtype=torch.float
+        )[None, None, :]
+        if dual is not None:
+            dual = torch.tensor(
+                dual,
+                device=DEVICE,
+                dtype=torch.float
+            )
+        xnet, new_dual = net(x_torch, dual)
+        if not update_dual:
+            return xnet.detach().cpu().numpy()[0, 0], None
+        else:
+            return xnet.detach().cpu().numpy()[0, 0], new_dual.detach().cpu().numpy()
+    elif model == "identity":
+        return x, None
 
-    Returns
-    -------
-    kernel : ndarray, shape (dim, dim)
-        Gaussian kernel of size dim*dim
-    """
-    t = np.linspace(-1, 1, dim)
-    gaussian = np.exp(-0.5 * (t / sigma) ** 2)
-    kernel = gaussian[None, :] * gaussian[:, None]
-    kernel /= kernel.sum()
 
-    return kernel[None, None, :, :]
+def pnp_deblurring(model, pth_kernel, x_observed, reg_par=0.5 * STD_NOISE,
+                   n_iter=50, net=None, update_dual=False):
 
+    if model in ["analysis", "synthesis"]:
+        model = "unrolled"
 
-sigma_noise = 0.05
-sigma_blurr = 0.1
+    # define operators
+    Phi, Phit = get_operators(type_op='deconvolution', pth_kernel=pth_kernel)
 
-blurr = gaussian_kernel(10, sigma_blurr)
-blurr_torch = torch.tensor(blurr, device=DEVICE, dtype=torch.float)
+    normPhi2 = op_norm2(Phi, Phit, x_observed.shape)
+    gamma = 1.99 / normPhi2
 
-blurred_img = torch.nn.functional.conv_transpose2d(
-    img.transpose(1, 0),
-    blurr_torch
-).transpose(1, 0)
+    x_n = Phit(x_observed)
+    table_energy = 1e10 * np.ones(n_iter)
+    current_dual = None
 
-noise = torch.randn(
-    blurred_img.size(),
-    dtype=blurred_img.dtype,
-    device=blurred_img.device
-)
-blurred_img += noise * sigma_noise
+    for k in tqdm(range(0, n_iter)):
+        g_n = Phit((Phi(x_n) - x_observed))
+        tmp = x_n - gamma * g_n
+        x_old = x_n.copy()
+        x_n, current_dual = apply_model(model, tmp, current_dual,
+                                        reg_par, net, update_dual)
+        table_energy[k] = np.sum((x_n - x_old)**2) / np.sum(x_old**2)
 
-blurred_img_display = torch.nn.functional.conv2d(
-    img.transpose(1, 0),
-    torch.flip(blurr_torch, dims=[2, 3]),
-    padding="same"
-).transpose(1, 0)
-
-noise = torch.randn(
-    blurred_img_display.size(),
-    dtype=blurred_img.dtype,
-    device=blurred_img.device
-)
-blurred_img_display += noise * sigma_noise
+    return np.clip(x_n, 0, 1), table_energy
 
 # %%
-# unrolled_cdl.set_lmbd(1e-8)
-out_regul, _ = unrolled_cdl.predict(
-    blurred_img,
-    blurr,
+
+dataloader = create_imagewoof_dataloader(
+    PATH_DATA,
+    min_sigma_noise=STD_NOISE,
+    max_sigma_noise=STD_NOISE,
+    device=DEVICE,
+    dtype=torch.float,
+    mini_batch_size=1,
+    train=False,
+    color=False,
+    fixed_noise=True
+)
+
+pth_kernel = 'blur_models/blur_3.mat'
+
+img_noise, img = next(iter(dataloader))
+img_noise, img = img_noise.cpu().numpy()[0, 0], img.cpu().numpy()[0, 0]
+
+h = scipy.io.loadmat(pth_kernel)
+h = np.array(h['blur'])
+
+Phi, Phit = get_operators(type_op='deconvolution',
+                            pth_kernel=pth_kernel)
+x_blurred = Phi(img)
+nxb, nyb = x_blurred.shape
+x_observed = x_blurred + STD_NOISE * np.random.rand(nxb, nyb)
+
+
+x_result, energy = pnp_deblurring(
+    "analysis",
+    pth_kernel,
+    x_observed,
     n_iter=500,
-    img_test=img,
-    regul=True
+    reg_par=1e-3,
+    update_dual=True,
+    net=unrolled_net
 )
+# %%
+from skimage.metrics import peak_signal_noise_ratio
+
+psnr = peak_signal_noise_ratio(x_result, img)
 
 # %%
-out, _ = unrolled_cdl.predict(
-    blurred_img,
-    blurr,
-    n_iter=1000,
-    img_test=img,
-    regul=False,
-)
+psnr
+# %%
+energy[-1]
 
 # %%
-ols_denoised = unrolled_net(out)
-
-# %%
-def psnr(im1, im2):
-    return 10 * torch.log(1 / loss(im1, im2)) / np.log(10)
-
-
-init_pnp = torch.nn.functional.conv2d(
-    blurred_img.transpose(0, 1),
-    blurr_torch
-).transpose(0, 1)
-loss = torch.nn.MSELoss()
-
-fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-
-axs[0, 0].imshow(img.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[0, 0].set_axis_off()
-
-axs[0, 1].imshow(blurred_img_display.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[0, 1].set_axis_off()
-axs[0, 1].set_title(f"Blurred same\nPSNR: {psnr(blurred_img_display, img):.2f}")
-
-axs[0, 2].imshow(init_pnp.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[0, 2].set_axis_off()
-axs[0, 2].set_title(f"Init. PnP\nPSNR: {psnr(init_pnp, img):.2f}")
-
-axs[1, 0].imshow(out.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[1, 0].set_axis_off()
-axs[1, 0].set_title(f"OLS\nPSNR: {psnr(out, img):.2f}")
-
-axs[1, 1].imshow(out_regul.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[1, 1].set_axis_off()
-axs[1, 1].set_title(f"PnP\nPSNR: {psnr(out_regul, img):.2f}")
-
-axs[1, 2].imshow(ols_denoised.to("cpu").numpy()[0].transpose(1, 2, 0),
-              cmap=cmap)
-axs[1, 2].set_axis_off()
-axs[1, 2].set_title(f"OLS + denoising\nPSNR: {psnr(ols_denoised, img):.2f}")
-
-
-plt.tight_layout()
-plt.savefig("example_deblurring.png")
 
 # %%
