@@ -2,7 +2,8 @@ import torch
 import numpy as np
 
 from .models import UnrolledNet
-from .datasets import create_imagewoof_dataloader
+from .datasets import (create_imagewoof_dataloader,
+                       create_imagenet_dataloader)
 from .optimizers import SLS
 from .train import train
 from tqdm import tqdm
@@ -37,7 +38,9 @@ class UnrolledCDL:
         avg=True,
         rescale=False,
         fixed_noise=False,
-        activation="soft-thresholding"
+        activation="soft-thresholding",
+        verbose=True,
+        dataset="imagenet"
     ):
 
         self.mini_batch_size = mini_batch_size
@@ -52,6 +55,7 @@ class UnrolledCDL:
         self.download = download
         self.avg = avg
         self.rescale = rescale
+        self.verbose = verbose
 
         n_channels = 3 if color else 1
         self.color = color
@@ -87,8 +91,13 @@ class UnrolledCDL:
             max_sigma_noise = std_noise
             min_sigma_noise = std_noise
 
+        if dataset == "imagewoof":
+            create_dataloader = create_imagewoof_dataloader
+        elif dataset == "imagenet":
+            create_dataloader = create_imagenet_dataloader
+
         # Dataloader
-        self.train_dataloader = create_imagewoof_dataloader(
+        self.train_dataloader = create_dataloader(
             self.path_data,
             max_sigma_noise,
             min_sigma_noise,
@@ -102,7 +111,7 @@ class UnrolledCDL:
             fixed_noise=fixed_noise
         )
 
-        self.test_dataloader = create_imagewoof_dataloader(
+        self.test_dataloader = create_dataloader(
             self.path_data,
             max_sigma_noise,
             min_sigma_noise,
@@ -143,7 +152,8 @@ class UnrolledCDL:
             scheduler=self.scheduler,
             epochs=self.epochs,
             max_batch=self.max_batch,
-            rescale=self.rescale
+            rescale=self.rescale,
+            verbose=self.verbose
         )
 
         return self.unrolled_net, train_losses, test_losses

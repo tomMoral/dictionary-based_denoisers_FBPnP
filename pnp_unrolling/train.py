@@ -67,7 +67,8 @@ def train(
     scheduler=None,
     epochs=10,
     max_batch=None,
-    rescale=False
+    rescale=False,
+    verbose=True
 ):
     """
     Training process
@@ -100,12 +101,16 @@ def train(
 
     train_losses = []
     test_losses = [test_loss]
-    pbar = tqdm(range(epochs))
 
-    pbar.set_description(
-        f"Initialisation"
-        f" - Average test loss: {test_loss:.8f}"
-    )
+    if verbose:
+        pbar = tqdm(range(epochs))
+
+        pbar.set_description(
+            f"Initialisation"
+            f" - Average test loss: {test_loss:.8f}"
+        )
+    else:
+        pbar = range(epochs)
 
     for epoch in pbar:
 
@@ -123,11 +128,14 @@ def train(
         train_losses.append(train_loss)
         test_losses.append(test_loss)
 
-        pbar.set_description(
-            f"Epoch {epoch+1}"
-            f" - Average train loss: {train_loss:.8f}"
-            f" - Average test loss: {test_loss:.8f}"
-        )
+        if verbose:
 
-    print("Done")
+            pbar.set_description(
+                f"Epoch {epoch+1}"
+                f" - Average train loss: {train_loss:.8f}"
+                f" - Average test loss: {test_loss:.8f}"
+            )
+
+    if verbose:
+        print("Done")
     return train_losses, test_losses

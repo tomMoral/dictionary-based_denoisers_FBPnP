@@ -4,6 +4,8 @@ import torch
 import numpy as np
 import scipy
 import torch.nn as nn
+import itertools
+import pandas as pd
 
 from tqdm import tqdm
 from pnp_unrolling.unrolled_cdl import UnrolledCDL
@@ -17,8 +19,9 @@ from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 DATASET = "bsd"
 COLOR = True
-DEVICE = "cuda:1"
+DEVICE = "cuda:0"
 STD_NOISE = 0.05
+N_EXP = 5
 
 if DATASET == "imagenet":
     create_dataloader = create_imagenet_dataloader
@@ -106,63 +109,8 @@ def load_nets(params_unrolled, color):
 
 drunet, unrolled_analysis, unrolled_synthesis = load_nets(params_model, COLOR)
 
-# %%
-img_noise, img = next(iter(unrolled_synthesis.train_dataloader))
-img_result_synthesis, _ = unrolled_synthesis.unrolled_net(img_noise)
-img_result_analysis, _ = unrolled_analysis.unrolled_net(img_noise)
-img_result_synthesis = img_result_synthesis.to("cpu").detach().numpy()
-img_result_analysis = img_result_analysis.to("cpu").detach().numpy()
-
-fig, axs = plt.subplots(1, 4)
-
-if img_noise.shape[1] == 1:
-    cmap = "gray"
-else:
-    cmap = None
-
-axs[0].imshow(img_noise.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
-axs[0].set_axis_off()
-axs[1].imshow(img.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
-axs[1].set_axis_off()
-axs[2].imshow(img_result_synthesis[0].transpose(1, 2, 0), cmap=cmap)
-axs[2].set_axis_off()
-axs[3].imshow(img_result_analysis[0].transpose(1, 2, 0), cmap=cmap)
-axs[3].set_axis_off()
-plt.tight_layout()
-plt.show()
-
-# %%
 unrolled_net_synthesis, _, _ = unrolled_synthesis.fit()
 unrolled_net_analysis, _, _ = unrolled_analysis.fit()
-
-
-# %%
-
-
-img_result_synthesis, _ = unrolled_net_synthesis(img_noise)
-img_result_analysis, _ = unrolled_net_analysis(img_noise)
-img_result_synthesis = img_result_synthesis.to("cpu").detach().numpy()
-img_result_analysis = img_result_analysis.to("cpu").detach().numpy()
-
-fig, axs = plt.subplots(1, 4)
-
-if img_noise.shape[1] == 1:
-    cmap = "gray"
-else:
-    cmap = None
-
-axs[0].imshow(img_noise.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
-axs[0].set_axis_off()
-axs[1].imshow(img.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
-axs[1].set_axis_off()
-axs[2].imshow(img_result_synthesis[0].transpose(1, 2, 0), cmap=cmap)
-axs[2].set_axis_off()
-axs[3].imshow(img_result_analysis[0].transpose(1, 2, 0), cmap=cmap)
-axs[3].set_axis_off()
-plt.tight_layout()
-plt.show()
-# %%
-
 
 def apply_model(model, x, dual, reg_par, net=None, update_dual=False):
 
@@ -261,13 +209,9 @@ dataloader = create_dataloader(
 
 # %%
 
-pth_kernel = 'blur_models/blur_3.mat'
+def generate_results_pnp(model, pth_kernel, image_num, n_iter=1000, reg_par=1e-2):
 
-
-def generate_results_pnp(pth_kernel, n_iter=1000):
-
-    img_noise, img = next(iter(dataloader))
-    img_noise, img = img_noise.cpu().numpy()[0], img.cpu().numpy()[0]
+    img = IMAGES[image_num]
 
     h = scipy.io.loadmat(pth_kernel)
     h = np.array(h['blur'])
@@ -280,113 +224,75 @@ def generate_results_pnp(pth_kernel, n_iter=1000):
     nc, nxb, nyb = x_blurred.shape
     x_observed = x_blurred + STD_NOISE * np.random.rand(nc, nxb, nyb)
 
-    x_result_synthesis, convergence_synthesis, psnr_synthesis = pnp_deblurring(
-        "synthesis",
-        pth_kernel,
-        x_observed,
-        n_iter=n_iter,
-        reg_par=0.1,
-        update_dual=True,
-        net=unrolled_net_synthesis,
-        x_truth=img
-    )
+    if model == "synthesis":
+        net = unrolled_net_synthesis
+    elif model == "analysis":
+        net = unrolled_net_analysis
+    else:
+        net = drunet
 
-    x_result_analysis, convergence_analysis, psnr_analysis = pnp_deblurring(
-        "analysis",
+    _, convergence, psnr = pnp_deblurring(
+        model,
         pth_kernel,
         x_observed,
         n_iter=n_iter,
-        reg_par=0.001,
+        reg_par=reg_par,
         update_dual=True,
-        net=unrolled_net_analysis,
-        x_truth=img
-    )
-
-    x_result_drunet, convergence_drunet, psnr_drunet = pnp_deblurring(
-        "drunet",
-        pth_kernel,
-        x_observed,
-        n_iter=n_iter,
-        reg_par=0.1,
-        update_dual=True,
-        net=drunet,
+        net=net,
         x_truth=img
     )
 
     results = {
-        "analysis": [x_result_analysis, convergence_analysis, psnr_analysis],
-        "synthesis": [x_result_synthesis, convergence_synthesis, psnr_synthesis],
-        "drunet": [x_result_drunet, convergence_drunet, psnr_drunet],
-        "observation": x_observed,
-        "truth": img
+        "convergence": convergence,
+        "psnr": psnr
     }
 
     return results
 
 
 # %%
-N_EXP = 5
-list_results = []
+
+IMAGES = []
 for _ in range(N_EXP):
-    results = generate_results_pnp(pth_kernel)
-    list_results.append(results)
+    img_noise, img = next(iter(dataloader))
+    img_noise, img = img_noise.cpu().numpy()[0], img.cpu().numpy()[0]
+    IMAGES.append(img)
 
-# %%
+hyperparams = {
+    "image_num": np.arange(0, N_EXP, 1, dtype=int),
+    "pth_kernel": ['blur_models/blur_3.mat'],
+    "reg_par": np.logspace(-5, -1, num=5),
+    "model": ["drunet", "analysis", "synthesis"],
+    "n_iter": [1000],
+}
 
-fig, axs = plt.subplots(1, 3)
+keys, values = zip(*hyperparams.items())
+permuts_params = [dict(zip(keys, v)) for v in itertools.product(*values)]
 
-axs[0].plot(list_results[0]["synthesis"][1])
-axs[0].set_yscale("log")
-axs[0].set_title("Synthesis")
-axs[0].set_ylabel(r"$|x_{n+1} - x_{n}|$")
-axs[0].set_xlabel("N iterations")
 
-axs[1].plot(list_results[0]["analysis"][1])
-axs[1].set_yscale("log")
-axs[1].set_title("Analysis")
+dico_results = {}
 
-axs[2].plot(list_results[0]["drunet"][1])
-axs[2].set_yscale("log")
-axs[2].set_title("Drunet")
+for params in tqdm(permuts_params):
+    try:
 
-plt.tight_layout()
-plt.savefig("convergence.pdf")
+        # Run test
+        results = generate_results_pnp(**params)
 
-# %%
+        # Storing results
+        for key in params.keys():
+            if key not in dico_results:
+                dico_results[key] = [params[key]]
+            else:
+                dico_results[key].append(params[key])
 
-for i, results in enumerate(list_results):
+        for key in results.keys():
+            if key not in dico_results:
+                dico_results[key] = [results[key]]
+            else:
+                dico_results[key].append(results[key])
 
-    fig, axs = plt.subplots(1, 5, figsize=(10, 5))
+    except (KeyboardInterrupt, SystemExit):
+        raise
 
-    x_observed = results["observation"]
-    img = results["truth"]
-    x_result_synthesis = results["synthesis"][0]
-    x_result_analysis = results["analysis"][0]
-    x_result_drunet = results["drunet"][0]
-
-    psnr_synthesis = results["synthesis"][2][-1]
-    psnr_analysis = results["analysis"][2][-1]
-    psnr_drunet = results["drunet"][2][-1]
-
-    cmap = None
-
-    axs[0].set_axis_off()
-    axs[0].imshow(x_observed.transpose(1, 2, 0), cmap=cmap)
-    axs[0].set_title("Observation")
-    axs[1].imshow(img.transpose(1, 2, 0), cmap=cmap)
-    axs[1].set_title("Ground truth")
-    axs[1].set_axis_off()
-    axs[2].imshow(x_result_synthesis.transpose(1, 2, 0), cmap=cmap)
-    axs[2].set_title(f"Synthesis\n{psnr_synthesis:0.2f}dB")
-    axs[2].set_axis_off()
-    axs[3].imshow(x_result_analysis.transpose(1, 2, 0), cmap=cmap)
-    axs[3].set_title(f"Analysis\n{psnr_analysis:0.2f}dB")
-    axs[3].set_axis_off()
-    axs[4].imshow(x_result_drunet.transpose(1, 2, 0), cmap=cmap)
-    axs[4].set_title(f"Drunet\n{psnr_drunet:0.2f}dB")
-    axs[4].set_axis_off()
-
-    plt.tight_layout()
-    plt.savefig(f"example_image_{i}.pdf")
-    plt.clf()
-# %%
+results = pd.DataFrame(dico_results)
+results.to_csv("results/results_benchmark_full.csv")

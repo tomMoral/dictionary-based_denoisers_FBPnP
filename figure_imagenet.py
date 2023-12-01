@@ -1,29 +1,33 @@
-import numpy as np
+# %%
+import matplotlib.pyplot as plt
 import torch
-import torch.nn as nn
+import numpy as np
 import scipy
+import torch.nn as nn
 import bm3d
 import itertools
-import pandas as pd
 
+from tqdm import tqdm
 from pnp_unrolling.unrolled_cdl import UnrolledCDL
-from external.network_unet import UNetRes
-from external.utils_dpir import test_mode as test_mode_dpir
-from pnp_unrolling.datasets import (create_imagewoof_dataloader,
-                                    create_imagenet_dataloader)
-from utils.wavelet_utils import wavelet_op
 from utils.measurement_tools import get_operators
 from utils.tools import op_norm2
-from tqdm import tqdm
-from joblib import Memory
+from utils.wavelet_utils import wavelet_op
+
+from external.network_unet import UNetRes
+from external.utils_dpir import test_mode as test_mode_dpir
+
+from pnp_unrolling.datasets import (create_imagewoof_dataloader,
+                                    create_imagenet_dataloader)
 
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
+
 DATASET = "imagenet"
 COLOR = False
-DEVICE = "cuda:0"
-mem = Memory(location='./tmp_benchmark_pnp/', verbose=0)
-N_EXP = 1
+DEVICE = "cuda:2"
+reg = 0.5
+STD_NOISE = 0.05
+SIGMA_PNP = 0.05
 
 if DATASET == "imagenet":
     create_dataloader = create_imagenet_dataloader
@@ -32,18 +36,20 @@ elif DATASET == "imagewoof":
     create_dataloader = create_imagewoof_dataloader
     PATH_DATA = "/storage/store2/work/bmalezie/imagewoof/"
 
-
 PARAMS_UNROLLED = {
     "n_layers": [20],
     "n_components": [50],
     "kernel_size": [5],
     "avg": [False],
-    "D_shared": [True, False],
-    "lmbd": np.logspace(-5, -1, num=5),
-    "std_noise": [0.02, 0.04, 0.06, 0.08, 0.1],
+    "D_shared": [False],
+    # "lmbd": np.logspace(-5, -1, num=5),
+    "lmbd": [0.01],
+    "std_noise": [STD_NOISE],
     "dataset": [DATASET]
 }
 
+
+# %%
 
 def load_nets(params_unrolled):
     print("Loading drunet...")
@@ -121,18 +127,16 @@ def load_nets(params_unrolled):
 DRUNET, DICO_NETS = load_nets(PARAMS_UNROLLED)
 
 
-def prox_L1(x, tau):
-    return np.sign(x) * np.maximum(np.abs(x) - tau, 0)
-
+# %%
 
 def apply_model(model, x, dual, reg_par, net=None, update_dual=False):
 
     if model == "bm3d":
         return bm3d.bm3d(x, reg_par), None
-    elif model == "wavelet":
-        wave_choice = 'db8'
-        Psi, Psit = wavelet_op(x, wav=wave_choice, level=4)
-        return Psit(prox_L1(Psi(x), reg_par)), None
+    # elif model == "wavelet":
+    #     wave_choice = 'db8'
+    #     Psi, Psit = wavelet_op(x, wav=wave_choice, level=4)
+    #     return Psit(prox_L1(Psi(x), reg_par)), None
     elif model == "drunet":
         x_torch = torch.tensor(
             x,
@@ -196,7 +200,6 @@ def pnp_deblurring(model, pth_kernel, x_observed, reg_par=1e-2,
     return np.clip(x_n, 0, 1), table_energy
 
 
-@mem.cache
 def run_test(params):
 
     pth_kernel = params["pth_kernel"]
@@ -243,94 +246,127 @@ def run_test(params):
         "conv": conv
     }
 
-    return results
+    return results, rec
 
 
-if __name__ == "__main__":
 
-    dataloader = create_dataloader(
-        PATH_DATA,
-        min_sigma_noise=0.1,
-        max_sigma_noise=0.1,
-        device=DEVICE,
-        dtype=torch.float,
-        mini_batch_size=1,
-        train=False,
-        color=False,
-        fixed_noise=True,
-    )
+# %%
 
-    IMAGES = []
+dataloader = create_dataloader(
+    PATH_DATA,
+    min_sigma_noise=SIGMA_PNP,
+    max_sigma_noise=SIGMA_PNP,
+    device=DEVICE,
+    dtype=torch.float,
+    mini_batch_size=1,
+    train=False,
+    color=False,
+    fixed_noise=True,
+)
 
-    for i in range(N_EXP):
+IMAGES = []
+N_EXP = 3
 
-        img_noise, img = next(iter(dataloader))
-        img_noise, img = img_noise.cpu().numpy()[0, 0], img.cpu().numpy()[0, 0]
+for i in range(N_EXP):
 
-        IMAGES.append(img.copy())
+    img_noise, img = next(iter(dataloader))
+    img_noise, img = img_noise.cpu().numpy()[0, 0], img.cpu().numpy()[0, 0]
 
-    hyperparams = {
-        "images": np.arange(0, N_EXP, 1, dtype=int),
-        "pth_kernel": ['blur_models/blur_3.mat'],
-        "reg_par": np.logspace(-5, 0, num=20),
-        "model": ["identity", "analysis", "synthesis", "drunet", "bm3d"],
-        "n_iter": [500],
-        "update_dual": [False, True],
-    }
+    IMAGES.append(img.copy())
 
-    hyperparams.update(PARAMS_UNROLLED)
+hyperparams = {
+    "images": np.arange(0, N_EXP, 1, dtype=int),
+    "pth_kernel": ['blur_models/blur_3.mat'],
+    "reg_par": np.logspace(-5, 0, num=20),
+    "model": ["identity", "analysis", "synthesis", "drunet", "bm3d"],
+    "n_iter": [500],
+    "update_dual": [True],
+}
 
-    keys, values = zip(*hyperparams.items())
-    permuts_params = [dict(zip(keys, v)) for v in itertools.product(*values)]
+hyperparams.update(PARAMS_UNROLLED)
 
-    dico_results = {}
+keys, values = zip(*hyperparams.items())
+permuts_params = [dict(zip(keys, v)) for v in itertools.product(*values)]
 
-    for params in tqdm(permuts_params):
-        try:
-            # Avoid running again models with useless params
-            if params["model"] == "identity":
-                tmp = params["reg_par"]
-                params["reg_par"] = 0
+dico_results = {
+    "images": []
+}
 
-            if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
-                tmp_dual = params["update_dual"]
-                params["update_dual"] = True
+for params in tqdm(permuts_params):
+    try:
+        # Avoid running again models with useless params
+        if params["model"] == "identity":
+            tmp = params["reg_par"]
+            params["reg_par"] = 0
 
-                tmps = {}
-                for param_unrolled in PARAMS_UNROLLED:
-                    if param_unrolled != "std_noise":
-                        tmps[param_unrolled] = params[param_unrolled]
-                        params[param_unrolled] = 0
+        if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
+            tmp_dual = params["update_dual"]
+            params["update_dual"] = True
 
-            # Run test
-            results = run_test(params)
+            tmps = {}
+            for param_unrolled in PARAMS_UNROLLED:
+                if param_unrolled != "std_noise":
+                    tmps[param_unrolled] = params[param_unrolled]
+                    params[param_unrolled] = 0
 
-            # Get values back for useless params
-            if params["model"] == "identity":
-                params["reg_par"] = tmp
+        # Run test
+        results, img = run_test(params)
 
-            if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
-                params["update_dual"] = tmp_dual
+        # Get values back for useless params
+        if params["model"] == "identity":
+            params["reg_par"] = tmp
 
-                for param_unrolled in PARAMS_UNROLLED:
-                    if param_unrolled != "std_noise":
-                        params[param_unrolled] = tmps[param_unrolled]
+        if params["model"] in ["identity", "drunet", "wavelet", "bm3d"]:
+            params["update_dual"] = tmp_dual
 
-            # Storing results
-            for key in params.keys():
-                if key not in dico_results:
-                    dico_results[key] = [params[key]]
-                else:
-                    dico_results[key].append(params[key])
+            for param_unrolled in PARAMS_UNROLLED:
+                if param_unrolled != "std_noise":
+                    params[param_unrolled] = tmps[param_unrolled]
 
-            for key in results.keys():
-                if key not in dico_results:
-                    dico_results[key] = [results[key]]
-                else:
-                    dico_results[key].append(results[key])
+        # Storing results
+        for key in params.keys():
+            if key not in dico_results:
+                dico_results[key] = [params[key]]
+            else:
+                dico_results[key].append(params[key])
 
-        except (KeyboardInterrupt, SystemExit):
-            raise
+        for key in results.keys():
+            if key not in dico_results:
+                dico_results[key] = [results[key]]
+            else:
+                dico_results[key].append(results[key])
 
-    results = pd.DataFrame(dico_results)
-    results.to_csv(str("results/results_pnp_study_lambda.csv"))
+        dico_results["images"].append(img)
+
+    except (KeyboardInterrupt, SystemExit):
+
+        raise
+
+
+# %%
+
+# plt.clf()
+
+# fig, axs = plt.subplots(1, 3)
+
+# if img_noise.shape[1] == 1:
+#     cmap = "gray"
+# else:
+#     cmap = None
+
+# axs[0].imshow(img_noise.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
+# axs[0].set_axis_off()
+# axs[1].imshow(img.to("cpu").numpy()[0].transpose(1, 2, 0), cmap=cmap)
+# axs[1].set_axis_off()
+# axs[2].imshow(img_result[0].transpose(1, 2, 0), cmap=cmap)
+# axs[2].set_axis_off()
+# plt.tight_layout()
+# plt.show()
+
+
+
+# # %%
+
+# psnr = peak_signal_noise_ratio(x_result, img)
+
+# # %%
