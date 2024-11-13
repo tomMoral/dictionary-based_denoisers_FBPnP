@@ -36,6 +36,9 @@ class UnrolledNet(nn.Module):
         Work on normalized images, by default False
     D_shared : bool, optional
         Share dictionaries among layers, by default True
+    step_size_scaling : float, optional
+        Scaling of the step size, by default None, which maps to
+        1.0 for synthesis and 1.8 for analysis.
     """
 
     def __init__(
@@ -51,6 +54,7 @@ class UnrolledNet(nn.Module):
         random_state=2147483647,
         avg=False,
         D_shared=True,
+        step_size_scaling=None,
         activation="soft-thresholding",
         init_dual=True
     ):
@@ -95,35 +99,27 @@ class UnrolledNet(nn.Module):
 
         self.type_layer = type_layer
 
-        if self.type_layer == "synthesis":
+        if self.type_layer in ["analysis", "synthesis"]:
+            if self.type_layer == "synthesis":
+                Layer = SynthesisLayer
+                if step_size_scaling is None:
+                    step_size_scaling = 1.0
+            elif self.type_layer == "analysis":
+                Layer = AnalysisLayer
+                if step_size_scaling is None:
+                    step_size_scaling = 1.8
 
             self.model = nn.ModuleList(
-                [SynthesisLayer(
+                [Layer(
                     n_components,
                     kernel_size,
                     n_channels,
-                    lmbd,
                     device,
                     dtype,
                     random_state,
                     activation=activation,
-                    D_shared=D_init
-                ) for i in range(n_layers)]
-            )
-
-        elif self.type_layer == "analysis":
-
-            self.model = nn.ModuleList(
-                [AnalysisLayer(
-                    n_components,
-                    kernel_size,
-                    n_channels,
-                    lmbd,
-                    device,
-                    dtype,
-                    random_state,
-                    activation=activation,
-                    D_shared=D_init
+                    D_shared=D_init,
+                    step_size_scaling=step_size_scaling
                 ) for i in range(n_layers)]
             )
 
@@ -143,10 +139,6 @@ class UnrolledNet(nn.Module):
         self.conv = F.conv2d
 
     def set_lmbd(self, lmbd):
-        if self.type_layer != "dfb_net":
-            with torch.no_grad():
-                for layer in self.model:
-                    layer.lmbd = lmbd
         self.lmbd = lmbd
 
     def rescale(self):
@@ -197,7 +189,9 @@ class UnrolledNet(nn.Module):
             t_old = 1.
 
             for layer in self.model:
-                x_avg, out, t_old, out_old = layer(x_avg, out, t_old, out_old)
+                x_avg, out, t_old, out_old = layer(
+                    x_avg, out, t_old, out_old, self.lmbd
+                )
 
             reconstruction = self.convt(out, self.parameter)
 
@@ -217,7 +211,7 @@ class UnrolledNet(nn.Module):
                 )
 
             for layer in self.model:
-                x_avg, out = layer(x_avg, out)
+                x_avg, out = layer(x_avg, out, self.lmbd)
 
             # step = 1. / self.compute_lipschitz()
             # reconstruction = x_avg - step * self.convt(out, self.parameter)
@@ -241,13 +235,12 @@ class UnrolledNet(nn.Module):
 
 class UnrolledLayer(nn.Module):
 
-    def __init__(self, n_components, kernel_size, n_channels, lmbd,
+    def __init__(self, n_components, kernel_size, n_channels,
                  device, dtype, random_state, activation, type_layer,
-                 D_shared=None):
+                 D_shared=None, step_size_scaling=1.0):
 
         super().__init__()
 
-        self.lmbd = lmbd
         self.n_components = n_components
         self.n_channels = n_channels
         self.kernel_size = kernel_size
@@ -255,6 +248,7 @@ class UnrolledLayer(nn.Module):
         self.device = device
         self.random_state = random_state
         self.activation = activation
+        self.step_size_scaling = step_size_scaling
 
         self.generator = torch.Generator(self.device)
         self.generator.manual_seed(random_state)
@@ -287,7 +281,7 @@ class UnrolledLayer(nn.Module):
         """
         Rescale the parameter
         """
-        self.parameter /= np.sqrt(self.compute_lipschitz())
+        self.parameter.data /= np.sqrt(self.compute_lipschitz())
 
     def compute_lipschitz(self):
         """
@@ -302,50 +296,49 @@ class UnrolledLayer(nn.Module):
             lipschitz = 1
         return lipschitz
 
-    def forward(self, x):
+    def forward(self, x, lmbd=None):
 
         raise NotImplementedError
 
 
 class SynthesisLayer(UnrolledLayer):
 
-    def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, activation, D_shared=None):
+    def __init__(self, n_components, kernel_size, n_channels,
+                 device, dtype, random_state, activation, D_shared=None,
+                 step_size_scaling=1.0):
 
         super().__init__(
             n_components,
             kernel_size,
             n_channels,
-            lmbd,
             device,
             dtype,
             random_state,
             activation,
             "synthesis",
-            D_shared
+            D_shared,
+            step_size_scaling,
         )
 
-    def forward(self, x, z, t_old, z_old):
+    def get_lmbd_max(self, img):
+        with torch.no_grad():
+            return torch.max(torch.abs(self.conv(img, self.parameter)))
 
-        step = 1. / self.compute_lipschitz()
+    def forward(self, x, z, t_old, z_old, lmbd):
 
-        result1 = self.convt(z, self.parameter)
-        result2 = self.conv(
-            (result1 - x),
+        step = self.step_size_scaling / self.compute_lipschitz()
+
+        x_hat = self.convt(z, self.parameter)
+        grad = self.conv(
+            (x_hat - x),
             self.parameter
         )
 
-        out = z - step * result2
-        # thresh = torch.abs(out) - step * self.lmbd
-        # out = torch.sign(out) * F.relu(thresh)
+        out = z - step * grad
         if self.activation == "soft-thresholding":
-            out = out - torch.clip(
-                out,
-                -step * self.lmbd,
-                step * self.lmbd
-            )
+            out = out - torch.clip(out, -step * lmbd, step * lmbd)
         elif self.activation == "hard-thresholding":
-            out = torch.clip(out, -self.lmbd, self.lmbd)
+            out = out * (torch.abs(out) >= lmbd)
 
         # FISTA
         t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
@@ -356,36 +349,40 @@ class SynthesisLayer(UnrolledLayer):
 
 class AnalysisLayer(UnrolledLayer):
 
-    def __init__(self, n_components, kernel_size, n_channels, lmbd,
-                 device, dtype, random_state, activation, D_shared=None):
+    def __init__(self, n_components, kernel_size, n_channels,
+                 device, dtype, random_state, activation, D_shared=None,
+                 step_size_scaling=1.8):
 
         super().__init__(
             n_components,
             kernel_size,
             n_channels,
-            lmbd,
             device,
             dtype,
             random_state,
             activation,
             "analysis",
-            D_shared
+            D_shared,
+            step_size_scaling,
         )
 
-    def forward(self, x, u):
+    def get_lmbd_max(self, img):
+        return 1
+
+    def forward(self, x, u, lmbd):
 
         # step = 1. / self.compute_lipschitz()
 
         # result1 = x - step * self.convt(u, self.parameter)
         # result2 = u + self.conv(result1, self.parameter)
-        # out_u = torch.clip(result2, -self.lmbd / step, self.lmbd / step)
+        # out_u = torch.clip(result2, -lmbd / step, lmbd / step)
 
-        gamma = 1.8 / self.compute_lipschitz()
+        gamma = self.step_size_scaling / self.compute_lipschitz()
         tmp = x - self.convt(u, self.parameter)
         g1 = u + gamma * self.conv(tmp, self.parameter)
         out_u = g1 - gamma * (
-            F.relu(g1 / gamma - self.lmbd / gamma)
-            - F.relu(- g1 / gamma - self.lmbd / gamma)
+            F.relu(g1 / gamma - lmbd / gamma)
+            - F.relu(- g1 / gamma - lmbd / gamma)
         )
 
         return x, out_u

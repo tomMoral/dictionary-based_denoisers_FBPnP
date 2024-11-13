@@ -35,6 +35,7 @@ class UnrolledCDL:
         random_state=2147483647,
         window=False,
         D_shared=False,
+        step_size_scaling=None,
         avg=True,
         rescale=False,
         fixed_noise=False,
@@ -72,6 +73,7 @@ class UnrolledCDL:
             type_layer=type_unrolling,
             avg=avg,
             D_shared=D_shared,
+            step_size_scaling=step_size_scaling,
             activation=activation
         )
 
@@ -123,6 +125,9 @@ class UnrolledCDL:
             color=self.color,
             fixed_noise=fixed_noise
         )
+
+        # # Scale lambda max
+        # self.unrolled_net.set_lmbd(lmbd)
 
         # LR scheduler
         if self.max_batch is None:

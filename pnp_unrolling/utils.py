@@ -28,12 +28,12 @@ def init_params(shape, generator, dtype, device, type_init):
         ).weight.data
 
     elif type_init == "synthesis":
-        weights = torch.rand(
-            shape,
-            generator=generator,
-            dtype=dtype,
-            device=device
-        )
+        # weights = torch.rand(
+        #     shape,
+        #     generator=generator,
+        #     dtype=dtype,
+        #     device=device
+        # )
         # norm_atoms = torch.norm(
         #     weights,
         #     dim=(2, 3),
@@ -43,15 +43,15 @@ def init_params(shape, generator, dtype, device, type_init):
         #     torch.nonzero((norm_atoms == 0), as_tuple=False)
         # ] = 1
         # weights /= norm_atoms
-        # weights = nn.Conv2d(
-        #     in_channels=shape[1],
-        #     out_channels=shape[0],
-        #     kernel_size=shape[2],
-        #     padding=0,
-        #     bias=False,
-        #     device=device,
-        #     dtype=dtype
-        # ).weight.data
+        weights = nn.Conv2d(
+            in_channels=shape[1],
+            out_channels=shape[0],
+            kernel_size=shape[2],
+            padding=0,
+            bias=False,
+            device=device,
+            dtype=dtype
+        ).weight.data
 
     params = nn.Parameter(weights)
 
