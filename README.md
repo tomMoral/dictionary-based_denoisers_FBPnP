@@ -1,8 +1,19 @@
 # Plug-and-Play with unrolled dictionary learning
 
-`create_dataset.py`: downloads the dataset BSD500
+This repo contains the scripts to reproduce the experiments of the "[Analysis and Synthesis Denoisers for Forward-Backward Plug-and-Play Algorithms](https://hal.science/hal-04786802)",  Matthieu Kowalski, Benoît Malézieux, Thomas Moreau, Audrey Repetti, preprint 2024.
 
-`convergence_algorithm.py`: figures on convergence with respect to number of layers
+This paper aims to study the properties of a PnP scheme in which the denoiser is dictionary-based, either using a synthesis or an analysis formulation.
 
-`pnp_comparisons.py`: comparison between SD unrolling, AD unrolling and DRUNet in PnP (convergence, PSNR, examples)
+### Install
+
+This repo's dependencies can be installed using `pip install -r requirements`. 
+The experiments are performed using the `BSD500` dataset, which can be retrieved using the `create_dataset.py` script.
+
+### Experiments
+
+The paper's experiments can be reproduced using two scripts:
+
+- `convergence_algorithm.py`: this script runs the computations necessary to produce Figures 1 and 2.
+
+- `pnp_comparisons.py`: this script runs the comparison between DRUNet, and various versions of SD/AD unrolling in PnP. It compares the runtime, the convergence profile, and the PSNR for varying images and regularization parameters. It also displays some reconstruction examples.
 
