@@ -17,3 +17,8 @@ The paper's experiments can be reproduced using two scripts:
 
 - `pnp_comparisons.py`: this script runs the comparison between DRUNet, and various versions of SD/AD unrolling in PnP. It compares the runtime, the convergence profile, and the PSNR for varying images and regularization parameters. It also displays some reconstruction examples.
 
+Example of reconstruction provides the following figures:
+![image](https://github.com/user-attachments/assets/ba090eab-7304-4cb1-8923-846252ee1b3b)
+![image](https://github.com/user-attachments/assets/07a01385-4c2d-4671-ab30-48913946f733)
+
+
