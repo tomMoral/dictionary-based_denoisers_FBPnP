@@ -1,4 +1,4 @@
-# Plug-and-Play with unrolled dictionary learning
+# Forward-backward Plug-and-Play with dictionary-based denoisers
 
 This repo contains the scripts to reproduce the experiments of the "[Analysis and Synthesis Denoisers for Forward-Backward Plug-and-Play Algorithms](https://hal.science/hal-04786802)",  Matthieu Kowalski, Benoît Malézieux, Thomas Moreau, Audrey Repetti, preprint 2024.
 
