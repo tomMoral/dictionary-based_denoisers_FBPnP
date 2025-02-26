@@ -1,0 +1,28 @@
+solver:
+  - drunet
+  - dncnn
+  - synthesis:
+      n_epochs: 50
+      n_layers: [1, 20]
+      "step_size_scaling, accelerated": [
+          [0.9, True],
+          [1.9, False],
+      ]
+      init_dual: [True, False]
+      denoiser_n_layers: [1, 20, 50]
+      denoiser_accelerated: [True, False]
+      random_state: [2837, 234, 2354, 53454, 54353]
+  - analysis:
+      n_epochs: 50
+      n_layers: [1, 20]
+      "step_size_scaling, accelerated": [
+          [0.9, True],
+          [1.9, False],
+      ]
+      init_dual: [True, False]
+      denoiser_n_layers: [1, 20, 50]
+      denoiser_accelerated: [True, False]
+      random_state: [2837, 234, 2354, 53454, 54353]
+dataset:
+  - cbsd68
+timeout: 7200  # 2 hours timeout

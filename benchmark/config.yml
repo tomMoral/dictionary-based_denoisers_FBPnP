@@ -1,0 +1,15 @@
+plot_configs:
+  PSNR:
+    objective_column: objective_PSNR
+    kind: boxplot
+    scale: linear
+    with_quantiles: on
+    xaxis_type: Solver
+    yaxis_type: objective_column
+  Runtime:
+    objective_column: objective_runtime
+    kind: boxplot
+    scale: log
+    with_quantiles: true
+    xaxis_type: Solver
+    yaxis_type: objective_column

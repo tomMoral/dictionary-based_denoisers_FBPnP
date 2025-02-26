@@ -10,7 +10,7 @@ from .utils import init_params
 
 class UnrolledNet(nn.Module):
     """
-    Unrolled network based on Synthesi or Analysis Dictionary Learning
+    Unrolled network based on Synthesis or Analysis Dictionary Learning
 
     Parameters
     ----------
@@ -51,22 +51,30 @@ class UnrolledNet(nn.Module):
         device,
         dtype,
         type_layer="synthesis",
-        random_state=2147483647,
-        avg=False,
+        accelerated=True,
+        activation="soft-thresholding",
+        avg=True,
         D_shared=True,
         step_size_scaling=None,
-        activation="soft-thresholding",
-        init_dual=True
+        init_dual=True,
+        random_state=None,
     ):
 
         super().__init__()
 
-        self.dtype = dtype
-        self.device = device
+        self.type_layer = type_layer
+        self.lmbd = lmbd
         self.n_components = n_components
         self.kernel_size = kernel_size
+        self.activation = activation
+        self.step_size_scaling = step_size_scaling
+        self.init_dual = init_dual
         self.avg = avg
-        self.lmbd = lmbd
+        self.D_shared = D_shared is not False and D_shared is not None
+
+        self.dtype = dtype
+        self.device = device
+        self.random_state = random_state
 
         self.shape_params = (
             self.n_components,
@@ -75,29 +83,9 @@ class UnrolledNet(nn.Module):
             self.kernel_size
         )
 
-        self.generator = torch.Generator(self.device)
-        self.generator.manual_seed(random_state)
-
-        self.init_dual = init_dual
-
-        if type_layer in ["analysis", "synthesis"]:
-
-            self.parameter = init_params(
-                self.shape_params,
-                self.generator,
-                self.dtype,
-                self.device,
-                type_layer
-            )
-
-            self.D_shared = D_shared
-            if D_shared:
-                D_init = self.parameter
-
-            else:
-                D_init = None
-
-        self.type_layer = type_layer
+        self._generator = torch.Generator(self.device)
+        if random_state is not None:
+            self._generator.manual_seed(random_state)
 
         if self.type_layer in ["analysis", "synthesis"]:
             if self.type_layer == "synthesis":
@@ -109,6 +97,26 @@ class UnrolledNet(nn.Module):
                 if step_size_scaling is None:
                     step_size_scaling = 1.8
 
+            self.W_ = init_params(
+                self.shape_params,
+                self._generator,
+                self.dtype,
+                self.device,
+                type_layer
+            )
+
+            if self.D_shared:
+                if D_shared is True:
+                    D_init = self.W_
+                else:
+                    assert D_shared.shape == self.shape_params, (
+                        f"D_shared should have shape {self.shape_params}. "
+                        f" Got {D_shared.shape}"
+                    )
+                    D_init = self.W_ = torch.nn.Parameter(D_shared)
+            else:
+                D_init = None
+
             self.model = nn.ModuleList(
                 [Layer(
                     n_components,
@@ -116,9 +124,10 @@ class UnrolledNet(nn.Module):
                     n_channels,
                     device,
                     dtype,
-                    random_state,
+                    random_state=random_state,
                     activation=activation,
-                    D_shared=D_init,
+                    accelerated=accelerated,
+                    D_init=D_init,
                     step_size_scaling=step_size_scaling
                 ) for i in range(n_layers)]
             )
@@ -138,6 +147,41 @@ class UnrolledNet(nn.Module):
         self.convt = F.conv_transpose2d
         self.conv = F.conv2d
 
+    def clone(
+        self,
+        n_layers=None,
+        step_size_scaling=None,
+        accelerated=None,
+    ):
+        assert self.D_shared, (
+            "Cannot clone the model if D_shared is False"
+        )
+
+        if n_layers is None:
+            n_layers = len(self.model)
+        if step_size_scaling is None:
+            step_size_scaling = self.step_size_scaling
+        if accelerated is None:
+            accelerated = self.accelerated
+
+        return UnrolledNet(
+            n_layers=n_layers,
+            n_components=self.n_components,
+            kernel_size=self.kernel_size,
+            n_channels=self.shape_params[1],
+            lmbd=self.lmbd,
+            device=self.device,
+            dtype=self.dtype,
+            type_layer=self.type_layer,
+            accelerated=accelerated,
+            activation=self.activation,
+            random_state=self.random_state,
+            avg=self.avg,
+            D_shared=self.W_.detach().clone(),
+            step_size_scaling=step_size_scaling,
+            init_dual=self.init_dual
+        )
+
     def set_lmbd(self, lmbd):
         self.lmbd = lmbd
 
@@ -149,13 +193,13 @@ class UnrolledNet(nn.Module):
             if not self.D_shared:
                 for layer in self.model:
                     layer.rescale()
-            self.parameter /= np.sqrt(self.compute_lipschitz())
+            self.W_ /= np.sqrt(self.compute_lipschitz())
 
     def compute_lipschitz(self):
         """
         Compute the Lipschitz constant using the FFT.
         """
-        fourier_dico = fft.fftn(self.parameter, dim=(1, 2, 3))
+        fourier_dico = fft.fftn(self.W_, dim=(1, 2, 3))
         lipschitz = torch.amax(
             torch.real(fourier_dico * torch.conj(fourier_dico)),
             dim=(1, 2, 3)
@@ -164,80 +208,70 @@ class UnrolledNet(nn.Module):
             lipschitz = 1
         return lipschitz
 
-    def forward(self, x, out=None):
-
+    def forward(self, z, u0=None):
         if self.avg:
-            current_avg = torch.mean(x, axis=(2, 3), keepdim=True)
-            current_std = torch.std(x, axis=(2, 3), keepdim=True)
-            x_avg = (x - current_avg) / current_std
-        else:
-            x_avg = x
+            current_avg = torch.mean(z, axis=(2, 3), keepdim=True)
+            current_std = torch.std(z, axis=(2, 3), keepdim=True)
+            z = (z - current_avg) / current_std
 
         if self.type_layer == "synthesis":
+            # Init optim variable with warm-start or 0
+            if u0 is None:
+                if self.init_dual:
+                    u = self.conv(z, self.W_)
+                else:
+                    u = torch.zeros(
+                        (z.shape[0],
+                         self.n_components,
+                         z.shape[2] - self.kernel_size + 1,
+                         z.shape[3] - self.kernel_size + 1),
+                        dtype=self.dtype,
+                        device=self.device
+                    )
+            else:
+                u = u0
 
-            if out is None:
-                out = torch.zeros(
-                    (x.shape[0],
-                     self.n_components,
-                     x.shape[2] - self.kernel_size + 1,
-                     x.shape[3] - self.kernel_size + 1),
-                    dtype=self.dtype,
-                    device=self.device
+            for it, layer in enumerate(self.model):
+                z, u, Tsu = layer(
+                    z, u, it, self.lmbd
                 )
 
-            out_old = out.clone()
-            t_old = 1.
-
-            for layer in self.model:
-                x_avg, out, t_old, out_old = layer(
-                    x_avg, out, t_old, out_old, self.lmbd
-                )
-
-            reconstruction = self.convt(out, self.parameter)
+            reconstruction = self.convt(Tsu, self.W_)
+            u_current = u
 
         elif self.type_layer == "analysis":
+            if u0 is None:
+                if self.init_dual:
+                    v = self.conv(z, self.W_)
+                else:
+                    v = torch.zeros(
+                        (z.shape[0],
+                         self.n_components,
+                         z.shape[2] - self.kernel_size + 1,
+                         z.shape[3] - self.kernel_size + 1),
+                        dtype=self.dtype,
+                        device=self.device
+                    )
+            else:
+                v = u0
 
-            if out is None and self.init_dual:
-                out = self.conv(x_avg, self.parameter)
+            for it, layer in enumerate(self.model):
+                z, v, TAv = layer(z, v, it + 1, self.lmbd)
 
-            elif out is None:
-                out = torch.zeros(
-                    (x.shape[0],
-                     self.n_components,
-                     x.shape[2] - self.kernel_size + 1,
-                     x.shape[3] - self.kernel_size + 1),
-                    dtype=self.dtype,
-                    device=self.device
-                )
-
-            for layer in self.model:
-                x_avg, out = layer(x_avg, out, self.lmbd)
-
-            # step = 1. / self.compute_lipschitz()
-            # reconstruction = x_avg - step * self.convt(out, self.parameter)
-
-            reconstruction = x_avg - self.convt(out, self.parameter)
-
-        elif self.type_layer == "dfb_net":
-
-            reconstruction, out = self.model(
-                x_avg,
-                x_avg,
-                self.lmbd,
-                u=out,
-            )
+            reconstruction = z - self.convt(TAv, self.W_)
+            u_current = v
 
         if self.avg:
             reconstruction = reconstruction * current_std + current_avg
 
-        return torch.clip(reconstruction, 0, 1), out
+        return torch.clip(reconstruction, 0, 1), u_current
 
 
 class UnrolledLayer(nn.Module):
 
     def __init__(self, n_components, kernel_size, n_channels,
-                 device, dtype, random_state, activation, type_layer,
-                 D_shared=None, step_size_scaling=1.0):
+                 device, dtype, random_state, activation,
+                 D_init=None, step_size_scaling=1.0, accelerated=True):
 
         super().__init__()
 
@@ -249,9 +283,11 @@ class UnrolledLayer(nn.Module):
         self.random_state = random_state
         self.activation = activation
         self.step_size_scaling = step_size_scaling
+        self.accelerated = accelerated
 
-        self.generator = torch.Generator(self.device)
-        self.generator.manual_seed(random_state)
+        self._generator = torch.Generator(self.device)
+        if random_state is not None:
+            self._generator.manual_seed(random_state)
 
         self.shape_params = (
             self.n_components,
@@ -260,19 +296,16 @@ class UnrolledLayer(nn.Module):
             self.kernel_size
         )
 
-        if D_shared is None:
-
-            self.parameter = init_params(
+        if D_init is None:
+            self.W_ = init_params(
                 self.shape_params,
-                self.generator,
+                self._generator,
                 self.dtype,
                 self.device,
-                type_layer
+                self.type_layer
             )
-
         else:
-
-            self.parameter = D_shared
+            self.W_ = D_init
 
         self.conv = F.conv2d
         self.convt = F.conv_transpose2d
@@ -281,13 +314,13 @@ class UnrolledLayer(nn.Module):
         """
         Rescale the parameter
         """
-        self.parameter.data /= np.sqrt(self.compute_lipschitz())
+        self.W_.data /= np.sqrt(self.compute_lipschitz())
 
     def compute_lipschitz(self):
         """
         Compute the Lipschitz constant using the FFT.
         """
-        fourier_dico = fft.fftn(self.parameter, dim=(1, 2, 3))
+        fourier_dico = fft.fftn(self.W_, dim=(1, 2, 3))
         lipschitz = torch.amax(
             torch.real(fourier_dico * torch.conj(fourier_dico)),
             dim=(1, 2, 3)
@@ -296,93 +329,64 @@ class UnrolledLayer(nn.Module):
             lipschitz = 1
         return lipschitz
 
-    def forward(self, x, lmbd=None):
+    def forward(self, z, u, it, lmbd=None):
+        """Forward pass of the layer.
 
+        It takes in the initial image z and the current estimate u,
+        as well as the current iteration number it and the threshold lmbd.
+        """
         raise NotImplementedError
 
 
 class SynthesisLayer(UnrolledLayer):
 
-    def __init__(self, n_components, kernel_size, n_channels,
-                 device, dtype, random_state, activation, D_shared=None,
-                 step_size_scaling=1.0):
-
-        super().__init__(
-            n_components,
-            kernel_size,
-            n_channels,
-            device,
-            dtype,
-            random_state,
-            activation,
-            "synthesis",
-            D_shared,
-            step_size_scaling,
-        )
+    type_layer = "synthesis"
 
     def get_lmbd_max(self, img):
         with torch.no_grad():
-            return torch.max(torch.abs(self.conv(img, self.parameter)))
+            return torch.max(torch.abs(self.conv(img, self.W_)))
 
-    def forward(self, x, z, t_old, z_old, lmbd):
+    def forward(self, z, u, it, lmbd):
 
-        step = self.step_size_scaling / self.compute_lipschitz()
+        tau = self.step_size_scaling / self.compute_lipschitz()
 
-        x_hat = self.convt(z, self.parameter)
-        grad = self.conv(
-            (x_hat - x),
-            self.parameter
-        )
-
-        out = z - step * grad
+        diff = self.convt(u, self.W_) - z
+        TSu = u - tau * self.conv(diff, self.W_)
         if self.activation == "soft-thresholding":
-            out = out - torch.clip(out, -step * lmbd, step * lmbd)
+            TSu = TSu - torch.clip(TSu, -tau * lmbd, tau * lmbd)
         elif self.activation == "hard-thresholding":
-            out = out * (torch.abs(out) >= lmbd)
+            TSu = TSu * (torch.abs(TSu) >= lmbd)
 
-        # FISTA
-        t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
-        z = out + ((t_old-1) / t) * (out - z_old)
+        # Inertial acceleration
+        if self.accelerated:
+            alpha_i = (it + 1.1) / 2.1 if it > 0 else 1
+            u = (1 + alpha_i) * TSu - alpha_i * u
+        else:
+            u = TSu
 
-        return x, z, t, out
+        return z, u, TSu
 
 
 class AnalysisLayer(UnrolledLayer):
 
-    def __init__(self, n_components, kernel_size, n_channels,
-                 device, dtype, random_state, activation, D_shared=None,
-                 step_size_scaling=1.8):
-
-        super().__init__(
-            n_components,
-            kernel_size,
-            n_channels,
-            device,
-            dtype,
-            random_state,
-            activation,
-            "analysis",
-            D_shared,
-            step_size_scaling,
-        )
+    type_layer = "analysis"
 
     def get_lmbd_max(self, img):
         return 1
 
-    def forward(self, x, u, lmbd):
+    def forward(self, z, v, it, lmbd):
 
-        # step = 1. / self.compute_lipschitz()
+        nu = self.step_size_scaling / self.compute_lipschitz()
 
-        # result1 = x - step * self.convt(u, self.parameter)
-        # result2 = u + self.conv(result1, self.parameter)
-        # out_u = torch.clip(result2, -lmbd / step, lmbd / step)
+        diff = self.convt(v, self.W_) - z
+        TAv = v - nu * self.conv(diff, self.W_)
+        TAv = torch.clip(TAv, -lmbd / nu, lmbd / nu)
 
-        gamma = self.step_size_scaling / self.compute_lipschitz()
-        tmp = x - self.convt(u, self.parameter)
-        g1 = u + gamma * self.conv(tmp, self.parameter)
-        out_u = g1 - gamma * (
-            F.relu(g1 / gamma - lmbd / gamma)
-            - F.relu(- g1 / gamma - lmbd / gamma)
-        )
+        # Inertial acceleration
+        if self.accelerated:
+            alpha_i = (it + 1.1) / 2.1 if it > 0 else 1
+            v = (1 + alpha_i) * TAv - alpha_i * v
+        else:
+            v = TAv
 
-        return x, out_u
+        return z, v, TAv

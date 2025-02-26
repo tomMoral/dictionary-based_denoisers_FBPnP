@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pnp_unrolling"
+version = "0.1.0"
+
+
+requires-python = ">=3.10"
+authors = [
+  {name = "Thomas Moreau", email = "thomas.moreau@inria.fr"}
+]
+description = "Denoisers based on unrolled dictionary learning"
+readme = "README.md"
+
+dependencies = [
+  "deepinv",
+]
+
+[tool.setuptools]
+packages = ["pnp_unrolling"]
+

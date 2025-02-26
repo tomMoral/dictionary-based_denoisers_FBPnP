@@ -16,8 +16,11 @@ def train_loop(
     avg_loss = 0
     count = 0
     for batch, (X, y) in enumerate(dataloader):
+        X, y = X.to(model.device), y.to(model.device)
+
         # Compute prediction and loss
         pred, _ = model(X)
+        assert pred.shape == y.shape
         loss = loss_fn(pred, y)
         avg_loss += loss.item()
         count += 1
@@ -97,10 +100,12 @@ def train(
     """
     loss_fn = nn.MSELoss()
 
-    test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
-
-    train_losses = []
-    test_losses = [test_loss]
+    train_losses, test_losses = [], []
+    if test_dataloader is not None:
+        test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
+        test_losses.append(test_loss)
+    else:
+        test_loss = 0
 
     if verbose:
         pbar = tqdm(range(epochs))
@@ -123,10 +128,11 @@ def train(
             scheduler=scheduler,
             rescale=rescale
         )
-        test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
-
         train_losses.append(train_loss)
-        test_losses.append(test_loss)
+
+        if test_dataloader is not None:
+            test_loss = test_loop(test_dataloader, model, loss_fn, max_batch)
+            test_losses.append(test_loss)
 
         if verbose:
 
