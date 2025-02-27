@@ -380,7 +380,7 @@ class AnalysisLayer(UnrolledLayer):
 
         diff = self.convt(v, self.W_) - z
         TAv = v - nu * self.conv(diff, self.W_)
-        TAv = torch.clip(TAv, -lmbd / nu, lmbd / nu)
+        TAv = torch.clip(TAv, -lmbd, lmbd)
 
         # Inertial acceleration
         if self.accelerated:
