@@ -359,7 +359,7 @@ class SynthesisLayer(UnrolledLayer):
 
         # Inertial acceleration
         if self.accelerated:
-            alpha_i = (it + 1.1) / 2.1 if it > 0 else 1
+            alpha_i = (it + 2.1) / 2.1
             u = (1 + alpha_i) * TSu - alpha_i * u
         else:
             u = TSu
@@ -384,7 +384,7 @@ class AnalysisLayer(UnrolledLayer):
 
         # Inertial acceleration
         if self.accelerated:
-            alpha_i = (it + 1.1) / 2.1 if it > 0 else 1
+            alpha_i = (it + 2.1) / 2.1
             v = (1 + alpha_i) * TAv - alpha_i * v
         else:
             v = TAv

@@ -4,24 +4,22 @@ solver:
   - synthesis:
       n_epochs: 50
       n_layers: [1, 20]
-      "step_size_scaling, accelerated": [
-          [0.9, True],
-          [1.9, False],
+      "step_size_scaling, accelerated, denoiser_accelerated": [
+          [0.9, True, True],
+          [1.9, False, False],
       ]
-      init_dual: [True, False]
-      denoiser_n_layers: [1, 20, 50]
-      denoiser_accelerated: [True, False]
+      init_dual: [True]
+      denoiser_n_layers: [1, 20]
       random_state: [2837, 234, 2354, 53454, 54353]
   - analysis:
       n_epochs: 50
       n_layers: [1, 20]
-      "step_size_scaling, accelerated": [
-          [0.9, True],
-          [1.9, False],
+      "step_size_scaling, accelerated, denoiser_accelerated": [
+          [0.9, True, True],
+          [1.9, False, False],
       ]
-      init_dual: [True, False]
-      denoiser_n_layers: [1, 20, 50]
-      denoiser_accelerated: [True, False]
+      init_dual: [True]
+      denoiser_n_layers: [1, 20]
       random_state: [2837, 234, 2354, 53454, 54353]
 dataset:
   - cbsd68

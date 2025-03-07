@@ -27,25 +27,25 @@ class Objective(BaseObjective):
 
     requirements = ["pip::deepinv"]
 
-    # parameters = {
+    parameters = {
     #     'task': ["denoising", "blur"],
-    #     'sigma': [1e-3, 1e-2, 1e-1, 1]
-    # }
+        'sigma': [1e-2, 5e-2, 1e-1]
+    }
 
     # Minimal version of benchopt required to run this benchmark.
     # Bump it up if the benchmark depends on a new feature of benchopt.
     min_benchopt_version = "1.6"
 
-    def run_pnp(self, denoiser, task, sigma):
+    def run_pnp(self, denoiser, task, lmbd):
 
         x0 = self.test_dataset[0][0][None]
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         if task == "denoising":
-            physics = dinv.physics.Denoising(sigma=sigma)
+            physics = dinv.physics.Denoising(sigma=self.sigma)
             restoration = (
-                lambda y, *args, **kwargs: (denoiser(y, sigma), {})
-            )  # noqa: E731, E501
+                lambda y, *args, **kwargs: (denoiser(y, lmbd), {})
+            )  # noqa: E731
         elif task == "blur":
             kernel_torch = load_degradation(
                 "Levin09.npy", get_data_path() / "kernels", index=1
@@ -53,18 +53,18 @@ class Objective(BaseObjective):
             physics = dinv.physics.BlurFFT(
                 img_size=x0.shape,
                 filter=kernel_torch,
-                noise_model=dinv.physics.GaussianNoise(sigma=sigma),
+                noise_model=dinv.physics.GaussianNoise(sigma=self.sigma),
                 device=device
             )
 
             L = physics.compute_norm(
                 torch.randn_like(x0, device=device), tol=1e-4
             ).item()
-            step_size, lmbd = 1 / L, sigma * L
+            step_size = 1 / L
 
             prior = dinv.optim.PnP(denoiser)
             restoration = optim_builder(
-                "HQS", prior=prior, data_fidelity=dinv.optim.L2(),
+                "PGD", prior=prior, data_fidelity=dinv.optim.L2(),
                 max_iter=1000,
                 params_algo=dict(stepsize=step_size, g_param=lmbd)
             )
@@ -88,13 +88,13 @@ class Objective(BaseObjective):
                 runtime = perf_counter() - t_start
                 if metrics:
                     res.extend([{
-                        'task': task, 'sigma': sigma, 'id_img': i, 'iter': k,
+                        'task': task, 'lmbd': lmbd, 'id_img': i, 'iter': k,
                         **{k: v for k, v in zip(metrics.keys(), v)}
                     } for k, v in enumerate(zip(*[v[0] for v in metrics.values()]))])
 
                 res.append({
                     'task': task,
-                    'sigma': sigma,
+                    'lmbd': lmbd,
                     'PSNR': PSNR()(x_hat, x).detach().item(),
                     'SSIM': SSIM()(x_hat, x).detach().item(),
                     'id_img': i,
@@ -114,8 +114,8 @@ class Objective(BaseObjective):
 
         results = []
         for task in ["denoising", "blur"]:
-            for sigma in [1e-3, 1e-2, 1e-1, 1]:
-                results.extend(self.run_pnp(denoiser, task, sigma))
+            for lmbd in [1e-4, 1e-3, 1e-2, 1e-1]:
+                results.extend(self.run_pnp(denoiser, task, lmbd))
         return results
 
     def get_one_result(self):

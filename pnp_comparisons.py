@@ -32,7 +32,7 @@ def plot_img(img, ax, title=None):
 
 DATASET = "bsd"
 COLOR = True
-DEVICE = "cuda:3"
+DEVICE = "cuda:0"
 STD_NOISE = 0.05
 
 # Here the dataset is "BSD" but we use the same create_imagenet_dataloader
@@ -53,19 +53,15 @@ params_model_1 = {
     "device": DEVICE,
     "dtype": torch.float,
     "optimizer": "adam",
-    "path_data": DATA_PATH,
-    "max_sigma_noise": STD_NOISE,
-    "min_sigma_noise": STD_NOISE,
     "mini_batch_size": 1,
     "max_batch": 10,
     "epochs": 50,
     "avg": False,
     "rescale": False,
-    "fixed_noise": True,
     "D_shared": True,
     "step_size_scaling": 1.8,
     "lr": 1e-3,
-    "dataset": DATASET,
+    "accelerated": False
 }
 params_model_20 = {k: v for k, v in params_model_1.items()}
 params_model_20["n_layers"] = 20
@@ -89,7 +85,12 @@ def get_denoiser(model, **kwargs):
     elif model in ["analysis", "synthesis"]:
         unrolled_cdl = UnrolledCDL(type_unrolling=model, **kwargs)
         # Training unrolled networks
-        net, *_ = unrolled_cdl.fit()
+        train_dataloader = create_dataloader(
+            DATA_PATH, STD_NOISE, STD_NOISE, device=DEVICE, dtype=torch.float,
+            mini_batch_size=1, train=True, random_state=42, color=COLOR,
+            download=True, fixed_noise=True
+        )
+        net, *_ = unrolled_cdl.fit(train_dataloader)
     else:
         raise ValueError(
             f"Requested denoiser {model} which is not available."
@@ -98,11 +99,13 @@ def get_denoiser(model, **kwargs):
 
 
 DENOISERS = {
-    'SD': dict(model="synthesis", **params_model_20),
-    'AD': dict(model="analysis", **params_model_20),
-    'SD1': dict(model="synthesis", **params_model_1),
-    'AD1': dict(model="analysis", **params_model_1),
-    "DRUNet": dict(model="drunet"),
+    'SD (acc)': {'model': "synthesis", **params_model_20, 'accelerated': True},
+    'AD (acc)': {'model': "analysis", **params_model_20, 'accelerated': True},
+    'SD': {'model': "synthesis", **params_model_20},
+    'AD': {'model': "analysis", **params_model_20},
+    'SD1': {'model': "synthesis", **params_model_1},
+    'AD1': {'model': "analysis", **params_model_1},
+    "DRUNet": {'model': "drunet"},
 }
 
 for n in DENOISERS:
@@ -122,7 +125,7 @@ for n in ["SD", "AD"]:
             **{k: v for k, v in denoiser.items() if k not in ["model", "net"]}
         ).unrolled_net
         assert len(net.model) == 1
-        net.parameter = old_net.parameter
+        net.W_ = old_net.W_
         net.model = torch.nn.ModuleList([old_net.model[0]] * n_rep)
         DENOISERS[f"{n}_repeat_{n_rep}"] = dict(
             net=net, model=denoiser["model"]
@@ -136,7 +139,7 @@ for n in ["SD", "AD"]:
     ).unrolled_net
     assert len(net.model) == 20
     # Replace the model with only the first layer of the trained model
-    net.parameter = old_net.parameter
+    net.W_ = old_net.W_
     net.model = torch.nn.ModuleList([old_net.model[0]])
     DENOISERS[f"{n}_only1"] = dict(net=net, model=denoiser["model"])
 print("All denoisers loaded")
@@ -152,7 +155,7 @@ dataloader = create_dataloader(
 img_noise, img = next(iter(dataloader))
 
 n_d = len(DENOISERS)
-fig, axes = plt.subplots(3, 4)
+fig, axes = plt.subplots(3, 5)
 axes = axes.flatten()
 plot_img(img[0], axes[0], title="Original")
 plot_img(img_noise[0], axes[1], title="Noisy")
@@ -163,14 +166,12 @@ for i, n in enumerate(DENOISERS):
         else:
             img_clean = DENOISERS[n]["net"](img_noise, STD_NOISE)
     plot_img(img_clean[0], axes[i+2], title=n)
-    if i == 11:
+    if i == 14:
         break
 
 plt.tight_layout()
-plt.savefig("denoisers.pdf")
+plt.savefig("denoisers.png", dpi=300)
 plt.show()
-
-# import IPython; IPython.embed(colors='neutral')
 
 n_imgs = 100
 inference_runtime = []
@@ -315,6 +316,7 @@ def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1):
         "reg_par": reg_par,
     }
     for name, denoiser in DENOISERS.items():
+        print("Running Pnp for ", name)
 
         results[name] = pnp_deblurring(
             denoiser["model"],
@@ -332,9 +334,9 @@ def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1):
 
 # %%
 print("Running experiments...")
-N_EXP = 4
+N_EXP = 1
 list_results = []
-reg_pars = [1e-5, 1e-3, 1e-2, 1e-1]
+reg_pars = [1e-3, 1e-2]
 for _ in range(N_EXP):
     img_noise, img = next(iter(dataloader))
     img_noise, img = img_noise.cpu().numpy()[0], img.cpu().numpy()[0]

@@ -63,7 +63,7 @@ class NoisyImgDataset(Dataset):
                     device=device
                 )
                 scale *= (noise_range[0] - noise_range[1])
-                return scale + noise_range[1]
+                return scale + noise_range[0]
             self.get_noise_scale = _get_noise_scale
 
     def __getitem__(self, index):

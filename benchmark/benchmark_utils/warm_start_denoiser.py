@@ -12,6 +12,7 @@ class WarmStartDenoiser(torch.nn.Module):
     def reset(self):
         self.current_state = None
 
-    def forward(self, x, _):
+    def forward(self, x, lmbd):
+        self.denoiser.set_lmbd(lmbd)
         res, self.current_state = self.denoiser.forward(x, self.current_state)
         return res
