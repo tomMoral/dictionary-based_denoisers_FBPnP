@@ -99,12 +99,18 @@ def get_denoiser(model, **kwargs):
 
 
 DENOISERS = {
-    'SD (acc)': {'model': "synthesis", **params_model_20, 'accelerated': True},
-    'AD (acc)': {'model': "analysis", **params_model_20, 'accelerated': True},
     'SD': {'model': "synthesis", **params_model_20},
     'AD': {'model': "analysis", **params_model_20},
     'SD1': {'model': "synthesis", **params_model_1},
     'AD1': {'model': "analysis", **params_model_1},
+    'SD (acc)': {
+        'model': "synthesis", **params_model_20, 'accelerated': True,
+        'step_size_scaling': 0.9
+    },
+    'AD (acc)': {
+        'model': "analysis", **params_model_20, 'accelerated': True,
+        'step_size_scaling': 0.9
+    },
     "DRUNet": {'model': "drunet"},
 }
 
@@ -334,9 +340,9 @@ def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1):
 
 # %%
 print("Running experiments...")
-N_EXP = 1
+N_EXP = 4
 list_results = []
-reg_pars = [1e-3, 1e-2]
+reg_pars = [1e-5, 1e-3, 1e-2, 1e-1]
 for _ in range(N_EXP):
     img_noise, img = next(iter(dataloader))
     img_noise, img = img_noise.cpu().numpy()[0], img.cpu().numpy()[0]
@@ -439,6 +445,3 @@ for axes in axs:
 fig.tight_layout()
 fig.savefig("psnr.pdf")
 fig_time.savefig("psnr_time.pdf")
-
-
-# %%
