@@ -58,7 +58,7 @@ def create_imagewoof_dataloader(
             min_sigma_noise,
             device=device,
             dtype=dtype,
-            train=True,
+            train=train,
             random_state=random_state,
             color=color,
             fixed_noise=fixed_noise
@@ -235,7 +235,7 @@ def create_imagenet_dataloader(
             min_sigma_noise,
             device=device,
             dtype=dtype,
-            train=True,
+            train=train,
             random_state=random_state,
             color=color,
             fixed_noise=fixed_noise,
