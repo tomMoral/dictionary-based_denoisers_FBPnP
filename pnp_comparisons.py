@@ -307,7 +307,7 @@ def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1):
     Phi, Phit = get_operators(type_op="deconvolution", pth_kernel=pth_kernel)
     x_blurred = Phi_channels(img, Phi)
     nc, nxb, nyb = x_blurred.shape
-    x_observed = x_blurred + STD_NOISE * np.random.rand(nc, nxb, nyb)
+    x_observed = x_blurred + STD_NOISE * np.random.randn(nc, nxb, nyb)
 
     results = {
         "observation": x_observed,
