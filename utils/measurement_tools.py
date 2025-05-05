@@ -9,7 +9,7 @@ from numba import jit
 
 
 #* ************************************************************************
-#* Linear Convolution operators 
+#* Linear Convolution operators
 #* For Grayscale and RGD images
 # source https://matthieutrs.github.io/
 def Forward_conv(xo, a):
@@ -54,8 +54,8 @@ def get_operators(type_op='circular_deconvolution', pth_kernel='blur_models/blur
     if 'deconvolution' in type_op:
         h = scipy.io.loadmat(pth_kernel)
         h = np.array(h['blur'])
-        Forward_op = lambda x: Forward_conv(x,h) 
-        Backward_op = lambda x: Backward_conv(x,h)
+        Forward_op = lambda x: Forward_conv(x, h)
+        Backward_op = lambda x: Backward_conv(x, h)
         return Forward_op, Backward_op
 
     else:
@@ -63,7 +63,7 @@ def get_operators(type_op='circular_deconvolution', pth_kernel='blur_models/blur
 
 
 # #* ************************************************************************
-# #* Tomography operators 
+# #* Tomography operators
 # #* For Grayscale images
 
 # def get_operators_tomo2(type_op='tomography', ntheta = 100, nx =224 , ny =224 ):
@@ -93,13 +93,13 @@ def get_operators(type_op='circular_deconvolution', pth_kernel='blur_models/blur
 #             engine="numba",
 #             dtype="float64",
 #         )
-        
+
 #         LipPhi = np.real((RLop.H*RLop).eigs(neigs=1, which='LM')[0])
-        
+
 #         Forward_op = lambda x: RLop.H * x.ravel()/np.sqrt(LipPhi) # appropriate zero-padding
 #         Backward_op_tmp = lambda x: RLop * x.ravel()/np.sqrt(LipPhi)
-#         Backward_op = lambda x:  Backward_op_tmp(x).reshape(nx,ny)       
+#         Backward_op = lambda x:  Backward_op_tmp(x).reshape(nx,ny)
 #         return Forward_op, Backward_op
-    
+
 #     else:
 #         raise ValueError('Unknown operator type!')

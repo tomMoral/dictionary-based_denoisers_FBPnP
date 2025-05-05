@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
 from skimage.metrics import peak_signal_noise_ratio
 
 import torch
@@ -15,24 +16,37 @@ import torch.nn as nn
 import deepinv
 
 from pnp_unrolling.unrolled_cdl import UnrolledCDL
-from utils.measurement_tools import get_operators
-from utils.tools import op_norm2
 from pnp_unrolling.datasets import (
     create_imagenet_dataloader,
 )
 
 
-def plot_img(img, ax, title=None):
+def plot_img(img, ax, title=None, ref=None):
     img = img.detach().cpu().numpy().transpose(1, 2, 0).clip(0, 1)
     ax.imshow(img)
     ax.set_axis_off()
     if title:
+        if ref is not None:
+            ref = ref.detach().cpu().numpy().transpose(1, 2, 0).clip(0, 1)
+            psnr = peak_signal_noise_ratio(img, ref)
+            title = f"{title}\n({psnr:.1f})"
         ax.set_title(title)
+
+
+def get_full_model(denoiser, max_iter=1000):
+    old_net = denoiser["net"]
+    net = UnrolledCDL(
+        type_unrolling=denoiser["model"],
+        **{k: v for k, v in denoiser.items() if k not in ["model", "net"]}
+    ).unrolled_net
+    net.parameter = old_net.parameter
+    net.model = torch.nn.ModuleList([old_net.model[0]] * max_iter)
+    return net
 
 
 DATASET = "bsd"
 COLOR = True
-DEVICE = "cuda:3"
+DEVICE = "cuda:1"
 STD_NOISE = 0.05
 
 # Here the dataset is "BSD" but we use the same create_imagenet_dataloader
@@ -48,7 +62,7 @@ params_model_1 = {
     "n_layers": 1,
     "n_components": 50,
     "kernel_size": 5,
-    "lmbd": 1e-4,
+    "lmbd": STD_NOISE,
     "color": COLOR,
     "device": DEVICE,
     "dtype": torch.float,
@@ -66,6 +80,7 @@ params_model_1 = {
     "step_size_scaling": 1.8,
     "lr": 1e-3,
     "dataset": DATASET,
+    "init_dual": False
 }
 params_model_20 = {k: v for k, v in params_model_1.items()}
 params_model_20["n_layers"] = 20
@@ -98,16 +113,49 @@ def get_denoiser(model, **kwargs):
 
 
 DENOISERS = {
+    "DRUNet": dict(model="drunet"),
     'SD': dict(model="synthesis", **params_model_20),
     'AD': dict(model="analysis", **params_model_20),
     'SD1': dict(model="synthesis", **params_model_1),
     'AD1': dict(model="analysis", **params_model_1),
-    "DRUNet": dict(model="drunet"),
 }
 
 for n in DENOISERS:
     print(f"Loading {n}")
     DENOISERS[n]["net"] = get_denoiser(**DENOISERS[n])
+print("All denoisers loaded")
+
+
+# %%
+print("Evaluating all denoisers...")
+dataloader = create_dataloader(
+    DATA_PATH, STD_NOISE, STD_NOISE, device=DEVICE, dtype=torch.float,
+    mini_batch_size=1, train=True, random_state=42, color=COLOR,
+    download=True, fixed_noise=True
+)
+img_noise, img = next(iter(dataloader))
+
+n_d = len(DENOISERS)
+fig, axes = plt.subplots(1, 5)
+axes = axes.flatten()
+plot_img(img[0], axes[0], title="Original")
+plot_img(img_noise[0], axes[1], title="Noisy", ref=img[0])
+for i, n in enumerate(DENOISERS):
+    with torch.no_grad():
+        if n != "DRUNet":
+            # Get a model with the same parameters, but running to convergence
+            # (i.e. 1000 iterations)
+            net = get_full_model(DENOISERS[n])
+            img_clean = net(img_noise)[0]
+        else:
+            img_clean = DENOISERS[n]["net"](img_noise, STD_NOISE)
+    plot_img(img_clean[0], axes[i+2], title=n, ref=img[0])
+    if i == 4:
+        break
+
+plt.tight_layout()
+plt.savefig("denoisers.pdf")
+plt.show()
 
 # Add a denoiser composed of multiple iteration of a denoiser trained
 # with one layer
@@ -128,7 +176,7 @@ for n in ["SD", "AD"]:
             net=net, model=denoiser["model"]
         )
     # Restrict the model trained with 20 layers to only one layer
-    denoiser = DENOISERS[f"{n}"]
+    denoiser = DENOISERS[n]
     old_net = denoiser["net"]
     net = UnrolledCDL(
         type_unrolling=denoiser["model"],
@@ -140,37 +188,6 @@ for n in ["SD", "AD"]:
     net.model = torch.nn.ModuleList([old_net.model[0]])
     DENOISERS[f"{n}_only1"] = dict(net=net, model=denoiser["model"])
 print("All denoisers loaded")
-
-
-# %%
-print("Evaluating all denoisers...")
-dataloader = create_dataloader(
-    DATA_PATH, STD_NOISE, STD_NOISE, device=DEVICE, dtype=torch.float,
-    mini_batch_size=1, train=True, random_state=42, color=COLOR,
-    download=True, fixed_noise=True
-)
-img_noise, img = next(iter(dataloader))
-
-n_d = len(DENOISERS)
-fig, axes = plt.subplots(3, 4)
-axes = axes.flatten()
-plot_img(img[0], axes[0], title="Original")
-plot_img(img_noise[0], axes[1], title="Noisy")
-for i, n in enumerate(DENOISERS):
-    with torch.no_grad():
-        if n != "DRUNet":
-            img_clean = DENOISERS[n]["net"](img_noise)[0]
-        else:
-            img_clean = DENOISERS[n]["net"](img_noise, STD_NOISE)
-    plot_img(img_clean[0], axes[i+2], title=n)
-    if i == 11:
-        break
-
-plt.tight_layout()
-plt.savefig("denoisers.pdf")
-plt.show()
-
-# import IPython; IPython.embed(colors='neutral')
 
 n_imgs = 100
 inference_runtime = []
@@ -198,85 +215,52 @@ print(inference.groupby("denoiser")["runtime"].agg(['mean', 'std']).to_latex())
 
 
 # %%
-
-
-def apply_model(model, x, dual, reg_par, net=None, update_dual=False):
-
-    if model == "unrolled":
-        net.set_lmbd(reg_par)
-        x_torch = torch.tensor(x, device=DEVICE, dtype=torch.float)[None, :]
-        if dual is not None:
-            dual = torch.tensor(dual, device=DEVICE, dtype=torch.float)
-        with torch.no_grad():
-            xnet, new_dual = net(x_torch, dual)
-        if not update_dual:
-            return xnet.detach().cpu().numpy()[0], None
-        else:
-            return (
-                xnet.detach().cpu().numpy()[0],
-                new_dual.detach().cpu().numpy()
-            )
-    elif model == "identity":
-        return x, None
-    elif model == "drunet":
-        x_torch = torch.tensor(x, device=DEVICE, dtype=torch.float)[None, :]
-        with torch.no_grad():
-            xnet = net(x_torch, reg_par)
-        return np.clip(xnet.detach().cpu().numpy()[0], 0, 1), None
-
-
-def Phi_channels(x, Phi):
-
-    new_x = np.concatenate(
-        [Phi(x[i])[None, :] for i in range(x.shape[0])],
-        axis=0
-    )
-
-    return new_x
-
-
 def pnp_deblurring(
     model,
-    pth_kernel,
+    phy,
     x_observed,
     reg_par=0.5 * STD_NOISE,
     n_iter=50,
     net=None,
-    update_dual=False,
     x_truth=None,
 ):
 
     if model in ["analysis", "synthesis"]:
         model = "unrolled"
+        net.set_lmbd(reg_par)
 
-    # define operators
-    Phi, Phit = get_operators(type_op="deconvolution", pth_kernel=pth_kernel)
-
-    normPhi2 = op_norm2(Phi, Phit, x_observed.shape)
+    with torch.no_grad():
+        x_n = phy.A_adjoint(torch.tensor(x_observed, device=DEVICE))
+        normPhi2 = phy.compute_norm(torch.rand_like(x_observed[0]))
     # gamma = 1.99 / normPhi2
     gamma = 1.0 / normPhi2
-
-    x_n = Phi_channels(x_observed, Phit)
+    F_psnr = deepinv.metric.PSNR()
 
     cvg, psnr, runtime = [1e10] * n_iter, [0] * n_iter, [0] * n_iter
 
     current_dual = None
     t_iter = 0
-    for k in tqdm(range(0, n_iter)):
-        t_start = time.perf_counter()
-        g_n = Phi_channels((Phi_channels(x_n, Phi) - x_observed), Phit)
-        tmp = x_n - gamma * g_n
-        x_old = x_n.copy()
-        x_n, current_dual = apply_model(
-            model, tmp, current_dual, reg_par, net, update_dual
-        )
-        t_iter += time.perf_counter() - t_start
-        cvg[k] = np.sum((x_n - x_old) ** 2)
-        runtime[k] = t_iter
-        if x_truth is not None:
-            psnr[k] = peak_signal_noise_ratio(x_n, x_truth)
+    with torch.no_grad():
+        for k in tqdm(range(0, n_iter)):
+            t_start = time.perf_counter()
+            g_n = phy.A_adjoint((phy.A(x_n) - x_observed))
+            tmp = x_n - gamma * g_n
+            x_old = x_n
+            if model == "unrolled":
+                x_n, current_dual = net(tmp, current_dual)
+            elif model == "drunet":
+                x_n = net(tmp, reg_par)
+            x_n = x_n.clip(0, 1)
+            t_iter += time.perf_counter() - t_start
+            cvg[k] = ((x_n - x_old) ** 2).sum().item()
+            runtime[k] = t_iter
+            if x_truth is not None:
+                psnr[k] = F_psnr(x_n, x_truth).item()
 
-    return dict(img=np.clip(x_n, 0, 1), cvg=cvg, psnr=psnr, time=runtime)
+    return dict(
+        img=torch.clip(x_n, 0, 1).detach().cpu().numpy(),
+        cvg=cvg, psnr=psnr, time=runtime
+    )
 
 
 # %%
@@ -299,30 +283,36 @@ dataloader = create_dataloader(
 pth_kernel = "blur_models/blur_3.mat"
 
 
-def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1):
+def generate_results_pnp(pth_kernel, img, n_iter=1000, reg_par=0.1, seed=427):
 
     h = scipy.io.loadmat(pth_kernel)
     h = np.array(h["blur"])
 
-    Phi, Phit = get_operators(type_op="deconvolution", pth_kernel=pth_kernel)
-    x_blurred = Phi_channels(img, Phi)
-    nc, nxb, nyb = x_blurred.shape
-    x_observed = x_blurred + STD_NOISE * np.random.rand(nc, nxb, nyb)
+    generator = torch.Generator(device=DEVICE)
+    generator.manual_seed(seed)
+
+    phy = deepinv.physics.BlurFFT(
+        filter=torch.tensor(h[None, None]), img_size=img.shape[1:],
+        noise_model=deepinv.physics.GaussianNoise(
+            sigma=STD_NOISE, rng=generator
+        ),
+        device=DEVICE
+    )
+    x_observed = phy(img)
 
     results = {
-        "observation": x_observed,
-        "truth": img,
+        "observation": x_observed.detach().cpu().numpy()[0],
+        "truth": img.detach().cpu().numpy()[0],
         "reg_par": reg_par,
     }
     for name, denoiser in DENOISERS.items():
 
         results[name] = pnp_deblurring(
             denoiser["model"],
-            pth_kernel,
+            phy,
             x_observed,
             n_iter=n_iter,
             reg_par=reg_par,
-            update_dual=True,
             net=denoiser["net"],
             x_truth=img,
         )
@@ -337,8 +327,10 @@ list_results = []
 reg_pars = [1e-5, 1e-3, 1e-2, 1e-1]
 for _ in range(N_EXP):
     img_noise, img = next(iter(dataloader))
-    img_noise, img = img_noise.cpu().numpy()[0], img.cpu().numpy()[0]
     for reg_par in reg_pars:
+        print("\n\n" + "-" * 80)
+        print(f"Running experiment with img {i} and reg {reg_par}")
+        print("-" * 80)
         results = generate_results_pnp(pth_kernel, img, reg_par=reg_par)
         list_results.append(results)
 
@@ -347,12 +339,86 @@ for _ in range(N_EXP):
 with open("results.pkl", "wb") as f:
     pickle.dump(list_results, f)
 
+
 # %%
-n_reg = len(reg_pars)
+
+LABELS = {
+    "SD": "PNP-SD ($L_{train} = 20$)",
+    "SD_only1": "PNP-SD ($L_{train/test} = 20/1$)",
+    "SD1": "PNP-SD ($L_{train} = 1$)",
+    "SD_repeat_20": "PNP-SD ($L_{train/test} = 1/20$)",
+    "AD": "PNP-AD ($L_{train} = 20$)",
+    "AD_only1": "PNP-AD ($L_{train/test} = 20/1$)",
+    "AD1": "PNP-AD ($L_{train} = 1$)",
+    "AD_repeat_20": "PNP-AD ($L_{train/test} = 1/20$)",
+    "DRUNet": "PNP-DRUNet",
+    "cvg": r"$||x_{k-1} - x_{k}||$",
+    "psnr": "PSNR",
+}
+
+n_d = len(DENOISERS)
+n_cols = 4
+n_rows = n_d // n_cols + ((n_d % n_cols) != 0)
+
+cmap = plt.get_cmap('viridis', len(reg_pars))
+norm = LogNorm(1e-5, 1)
+
+for col in ["cvg", "psnr"]:
+    fig = plt.figure(figsize=(4*n_cols, 2.8*(n_rows + 0.5)))
+
+    gs = plt.GridSpec(n_rows + 1, n_cols, height_ratios=[0.5]+[1]*n_rows)
+    ax = fig.add_subplot(gs[1, 0])
+    axes = [ax] + [
+        fig.add_subplot(gs[1+k // n_cols, k % n_cols], sharex=ax, sharey=ax)
+        for k in range(len(LABELS)) if k > 0
+    ]
+    for ax in axes[-n_cols:]:
+        ax.set_xlabel("Iterations")
+    axes = {n: ax for n, ax in zip(DENOISERS.keys(), axes)}
+
+    for j, reg in enumerate(reg_pars):
+        # Calculate the exponent for 10^exponent
+        exponent = int(np.log10(reg))
+        med_curves = {}
+        for i, results in enumerate(list_results):
+            if results["reg_par"] == reg:
+                for name in DENOISERS:
+                    if name not in axes:
+                        continue
+                    t, curve = results[name]['time'], results[name][col]
+                    axes[name].semilogx(curve, c=cmap(norm(reg)), alpha=0.3)
+                    all_curves = med_curves.get(name, [])
+                    all_curves.append([t, curve])
+                    med_curves[name] = all_curves
+        for name, all_curves in med_curves.items():
+            if name not in axes:
+                continue
+            ax = axes[name]
+            t, curve = np.median(all_curves, axis=0)
+            ax.semilogx(curve, c=cmap(norm(reg)))
+            if col == "cvg":
+                ax.set_yscale("log")
+            ax.grid(True)
+            label = LABELS.get(name, name)
+            ax.set_title(f"{label}\n({t[-1]:.1f}s)")
+            if k % n_cols == 0:
+                ax.set_ylabel(LABELS[col])
+
+    ax_legend = fig.add_subplot(gs[0, :])
+    ax_legend.set_axis_off()
+    ax_legend.legend(
+        [plt.Line2D([], [], c=cmap(norm(reg)), lw=2) for reg in reg_pars],
+        [f"$\\lambda = 10^{{{np.log10(reg):.0f}}}$" for reg in reg_pars],
+        loc='upper center', ncols=4
+    )
+
+    plt.savefig(f"final_{col}.pdf")
+
+# %%
 n_denoisers = len(DENOISERS)
 n_rows = len(list_results)
 n_cols = n_denoisers + 2
-fig, axs = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4*n_rows))
+fig, axs = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows))
 
 for i, results in enumerate(list_results):
 
@@ -382,61 +448,3 @@ for i, results in enumerate(list_results):
 plt.tight_layout()
 plt.savefig("example_images.pdf", dpi=150)
 plt.clf()
-
-# %%
-
-fig, axs = plt.subplots(n_d, n_reg, sharey=True, figsize=(4*n_reg, 2.2*n_d))
-for j in range(n_reg):
-    # Calculate the exponent for 10^exponent
-    exponent = int(np.log10(reg_pars[j]))
-
-    for i, results in enumerate(list_results):
-        if results["reg_par"] == reg_pars[j]:
-            for k, name in enumerate(DENOISERS):
-                axs[k, j].loglog(results[name]['cvg'], c="green")
-                axs[k, j].set_title(
-                    rf"PnP-{name} $\lambda = 10^{{{exponent}}}$"
-                )  # Scientific notation for reg_pars[j]
-                axs[k, j].grid(True)
-
-# Set the ylable on the first column of each row
-for axes in axs:
-    axes[0].set_ylabel(r"$||x_{k-1} - x_{k}||$")
-
-plt.tight_layout()
-plt.savefig("convergence.pdf")
-
-
-# %%
-
-fig, axs = plt.subplots(
-    n_d, n_reg, sharey=True, figsize=(4*n_reg, 2.2*n_d)
-)
-fig_time, axs_time = plt.subplots(
-    n_d, n_reg, sharey=True, figsize=(4*n_reg, 2.2*n_d)
-)
-
-for j, reg in enumerate(reg_pars):
-    exponent = int(np.log10(reg))  # Calculate the exponent for 10^exponent
-
-    for i, results in enumerate(list_results):
-        if results["reg_par"] == reg:
-            for k, name in enumerate(DENOISERS):
-                res = results[name]
-                axs[k, j].semilogx(res['psnr'], c="green")
-                axs_time[k, j].semilogx(res['time'], res['psnr'], c="green")
-                axs[k, j].set_title(
-                    rf"{name} $\lambda = 10^{{{exponent}}}$"
-                )  # Scientific notation for reg
-                axs[k, j].grid(True)
-
-# Set the ylable on the first column of each row
-for axes in axs:
-    axes[0].set_ylabel("PSNR")
-
-fig.tight_layout()
-fig.savefig("psnr.pdf")
-fig_time.savefig("psnr_time.pdf")
-
-
-# %%

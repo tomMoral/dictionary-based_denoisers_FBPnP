@@ -341,8 +341,9 @@ class SynthesisLayer(UnrolledLayer):
             out = out * (torch.abs(out) >= lmbd)
 
         # FISTA
-        t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
-        z = out + ((t_old-1) / t) * (out - z_old)
+        # t = 0.5 * (1 + np.sqrt(1 + 4 * t_old * t_old))
+        # z = out + ((t_old-1) / t) * (out - z_old)
+        t, z = t_old, out
 
         return x, z, t, out
 

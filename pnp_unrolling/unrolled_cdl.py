@@ -41,7 +41,8 @@ class UnrolledCDL:
         fixed_noise=False,
         activation="soft-thresholding",
         verbose=True,
-        dataset="imagenet"
+        dataset="imagenet",
+        init_dual=False,
     ):
 
         self.mini_batch_size = mini_batch_size
@@ -74,7 +75,8 @@ class UnrolledCDL:
             avg=avg,
             D_shared=D_shared,
             step_size_scaling=step_size_scaling,
-            activation=activation
+            activation=activation,
+            init_dual=init_dual
         )
 
         # Optimizer

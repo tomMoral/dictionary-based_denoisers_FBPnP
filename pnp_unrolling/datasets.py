@@ -264,6 +264,10 @@ class ImageNetDataset(torch.utils.data.Dataset):
         self.fixed_noise = fixed_noise
         self.color = color
         self.files = []
+
+        if fixed_noise:
+            assert max_sigma_noise == min_sigma_noise
+
         if crop:
             self.crop_transform = Trans.RandomCrop(
                 crop_size,
