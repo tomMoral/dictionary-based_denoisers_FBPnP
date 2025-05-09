@@ -1,6 +1,7 @@
 # %%
 import time
 import pickle
+from pathlib import Path
 
 import scipy
 import numpy as np
@@ -19,6 +20,8 @@ from pnp_unrolling.unrolled_cdl import UnrolledCDL
 from pnp_unrolling.datasets import (
     create_imagenet_dataloader,
 )
+
+OUTPUT_DIR = Path("outputs")
 
 
 def plot_img(img, ax, title=None, ref=None):
@@ -154,7 +157,7 @@ for i, n in enumerate(DENOISERS):
         break
 
 plt.tight_layout()
-plt.savefig(f"denoisers_{STD_NOISE}.pdf")
+plt.savefig(OUTPUT_DIR / f"denoisers_{STD_NOISE}.pdf")
 plt.show()
 
 # %%
@@ -426,7 +429,7 @@ for col in ["cvg", "psnr"]:
         loc='upper center', ncols=4
     )
 
-    plt.savefig(f"final_{col}_{STD_NOISE}.pdf")
+    plt.savefig(OUTPUT_DIR / f"final_{col}_{STD_NOISE}.pdf")
 
 # %%
 n_denoisers = len(DENOISERS)
@@ -434,29 +437,44 @@ n_rows = len(list_results)
 n_cols = n_denoisers + 2
 fig, axs = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows))
 
+
+def save_img(img, title, idx, name, ax, reg=None):
+    # Save image, both as a single file and in
+
+    fig, ax_ = plt.subplots()
+    for a in (ax_, ax):
+        a.imshow(img, cmap=None)
+        a.set_axis_off()
+        a.set_title(title)
+
+    fname = f"img_{idx}_{name}"
+    if reg is not None:
+        fname = f"{fname}_{reg=:.0e}"
+    fig.savefig(OUTPUT_DIR / f"{fname}.png")
+    plt.close(fig)
+
+
 for i, results in enumerate(list_results):
 
+    idx = i // len(reg_pars)
     x_observed = results["observation"].transpose(1, 2, 0).clip(0, 1)
+    save_img(x_observed, "Observation", idx, name="observed", ax=axs[i, 0])
+
     img = results["truth"].transpose(1, 2, 0).clip(0, 1)
+    save_img(img, "Ground Truth", idx, name="gt", ax=axs[i, 1])
 
-    cmap = None
-
-    axs[i, 0].set_axis_off()
-    axs[i, 0].imshow(x_observed, cmap=cmap)
-    axs[i, 0].set_title(r"Observation $y$")
-    axs[i, 1].imshow(img, cmap=cmap)
-    axs[i, 1].set_title(r"Ground truth $\overline{x}$")
-    axs[i, 1].set_axis_off()
     for j, name in enumerate(DENOISERS):
         res = results[name]
         img_result = res['img'].transpose(1, 2, 0).clip(0, 1)
-        axs[i, j+2].imshow(img_result, cmap=cmap)
-        axs[i, j+2].set_title(
-            f"PnP-{name}$\\lambda = {results["reg_par"]:.0e}$\n"
+        title = (
+            f"PnP-{name}$\\lambda = {results['reg_par']:.0e}$\n"
             f"PSNR = {results[name]['psnr'][-1]:0.2f} dB"
         )
-        axs[i, j+2].set_axis_off()
+        save_img(
+            img_result, title, idx, name=name, ax=axs[i, j+2],
+            reg=results["reg_par"]
+        )
 
 plt.tight_layout()
-plt.savefig(f"example_images_{STD_NOISE}.pdf", dpi=150)
+fig.savefig(OUTPUT_DIR / f"example_images_{STD_NOISE=}.pdf", dpi=150)
 plt.clf()
