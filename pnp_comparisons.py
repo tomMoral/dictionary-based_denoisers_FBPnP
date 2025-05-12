@@ -24,8 +24,9 @@ from pnp_unrolling.datasets import (
 OUTPUT_DIR = Path("outputs")
 
 
-def plot_img(img, ax, title=None, ref=None):
-    img = img.detach().cpu().numpy().transpose(1, 2, 0).clip(0, 1)
+def plot_img(img, ax, title=None, ref=None, name=None):
+    if isinstance(img, torch.Tensor):
+        img = img.detach().cpu().numpy().transpose(1, 2, 0).clip(0, 1)
     ax.imshow(img)
     ax.set_axis_off()
     if title:
@@ -34,6 +35,13 @@ def plot_img(img, ax, title=None, ref=None):
             psnr = peak_signal_noise_ratio(img, ref)
             title = f"{title}\n({psnr:.1f})"
         ax.set_title(title)
+    if name is not None:
+        fig, ax = plt.subplots()
+        ax.set_axis_off()
+        ax.imshow(img)
+        fig.tight_layout()
+        fig.savefig(OUTPUT_DIR / f"{name}.png", dpi=300)
+        plt.close(fig)
 
 
 def get_full_model(denoiser, max_iter=1000):
@@ -118,47 +126,15 @@ def get_denoiser(model, **kwargs):
 DENOISERS = {
     "DRUNet": dict(model="drunet"),
     'SD': dict(model="synthesis", **params_model_20),
-    'AD': dict(model="analysis", **params_model_20),
     'SD1': dict(model="synthesis", **params_model_1),
+    'AD': dict(model="analysis", **params_model_20),
     'AD1': dict(model="analysis", **params_model_1),
 }
 
 for n in DENOISERS:
     print(f"Loading {n}")
     DENOISERS[n]["net"] = get_denoiser(**DENOISERS[n])
-print("All denoisers loaded")
 
-
-# %%
-print("Evaluating all denoisers...")
-dataloader = create_dataloader(
-    DATA_PATH, STD_NOISE, STD_NOISE, device=DEVICE, dtype=torch.float,
-    mini_batch_size=1, train=True, random_state=42, color=COLOR,
-    download=True, fixed_noise=True
-)
-img_noise, img = next(iter(dataloader))
-
-n_d = len(DENOISERS)
-fig, axes = plt.subplots(2, 4)
-axes = axes.flatten()
-plot_img(img[0], axes[0], title="Original")
-plot_img(img_noise[0], axes[1], title="Noisy", ref=img[0])
-for i, n in enumerate(DENOISERS):
-    with torch.no_grad():
-        if n != "DRUNet":
-            # Get a model with the same parameters, but running to convergence
-            # (i.e. 1000 iterations)
-            net = get_full_model(DENOISERS[n])
-            img_clean = net(img_noise)[0]
-        else:
-            img_clean = DENOISERS[n]["net"](img_noise, STD_NOISE)
-    plot_img(img_clean[0], axes[i+2], title=n, ref=img[0])
-    if i == 4:
-        break
-
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / f"denoisers_{STD_NOISE}.pdf")
-plt.show()
 
 # %%
 # Add a denoiser composed of multiple iteration of a denoiser trained
@@ -192,8 +168,53 @@ for n in ["SD", "AD"]:
     DENOISERS[f"{n}_only1"] = dict(net=net, model=denoiser["model"])
 print("All denoisers loaded")
 
+
+# %%
+print("Evaluating all denoisers...")
+dataloader = create_dataloader(
+    DATA_PATH, STD_NOISE, STD_NOISE, device=DEVICE, dtype=torch.float,
+    mini_batch_size=1, train=True, random_state=42, color=COLOR,
+    download=True, fixed_noise=True
+)
+img_noise, img = next(iter(dataloader))
+
+n_d = len(DENOISERS)
+fig, axes = plt.subplots(3, 4)
+axes = axes.flatten()
+plot_img(
+    img[0], axes[0], title="Original", name='denoising_orignial'
+)
+plot_img(
+    img_noise[0], axes[1], title="Noisy", ref=img[0], name='denoising_noisy'
+)
+for i, n in enumerate(DENOISERS):
+    with torch.no_grad():
+        if n != "DRUNet":
+            if i < 5:
+                # Get a model with the same parameters, but running to
+                # convergence (i.e. 1000 iterations)
+                net = get_full_model(DENOISERS[n])
+                img_clean = net(img_noise)[0]
+                plot_img(
+                    img_clean[0], axes[i+2], title=n, ref=img[0],
+                    name=f"denoising_cvg_{n}"
+                )
+            net = DENOISERS[n]['net']
+            img_clean = net(img_noise)[0]
+        else:
+            img_clean = DENOISERS[n]["net"](img_noise, STD_NOISE)
+    plot_img(
+        img_clean[0], axes[i+2], title=n, ref=img[0], name=f"denoising_{n}"
+    )
+
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "denoising_full.pdf", dpi=300)
+plt.show()
+
+
 # %%
 # Evaluate the runtime of all denoisers
+print("Computing Runtimes...")
 n_imgs = 100
 inference_runtime = []
 for k, (img_noise, _) in enumerate(dataloader):
@@ -336,7 +357,7 @@ N_EXP = 4
 list_results = []
 reg_pars = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1]
 for i in range(N_EXP):
-    img_noise, img = next(iter(dataloader))
+    _, img = next(iter(dataloader))
     for reg_par in reg_pars:
         print("\n\n" + "-" * 80)
         print(f"Running experiment with img {i} and reg {reg_par}")
@@ -355,14 +376,14 @@ with open("results.pkl", "wb") as f:
 # %%
 
 LABELS = {
-    "SD": "PNP-SD ($L_{train} = 20$)",
-    "SD_only1": "PNP-SD ($L_{train/test} = 20/1$)",
-    "SD1": "PNP-SD ($L_{train} = 1$)",
-    "SD_repeat_20": "PNP-SD ($L_{train/test} = 1/20$)",
-    "AD": "PNP-AD ($L_{train} = 20$)",
-    "AD_only1": "PNP-AD ($L_{train/test} = 20/1$)",
-    "AD1": "PNP-AD ($L_{train} = 1$)",
-    "AD_repeat_20": "PNP-AD ($L_{train/test} = 1/20$)",
+    "SD": "PNP-SD ($L_{train/PnP} = 20/20$)",
+    "SD_only1": "PNP-SD ($L_{train/PnP} = 20/1$)",
+    "SD1": "PNP-SD ($L_{train/PnP} = 1/1$)",
+    "SD_repeat_20": "PNP-SD ($L_{train/PnP} = 1/20$)",
+    "AD": "PNP-AD ($L_{train/PnP} = 20/20$)",
+    "AD_only1": "PNP-AD ($L_{train/PnP} = 20/1$)",
+    "AD1": "PNP-AD ($L_{train/PnP} = 1/1$)",
+    "AD_repeat_20": "PNP-AD ($L_{train/PnP} = 1/20$)",
     "DRUNet": "PNP-DRUNet",
 }
 
@@ -426,7 +447,7 @@ for col in ["cvg", "psnr"]:
     ax_legend.legend(
         [plt.Line2D([], [], c=cmap(norm(reg)), lw=2) for reg in reg_pars],
         [f"$\\lambda = {reg:.0e}$" for reg in reg_pars],
-        loc='upper center', ncols=4
+        loc='upper center', ncols=len(reg_pars)
     )
 
     plt.savefig(OUTPUT_DIR / f"final_{col}_{STD_NOISE}.pdf")
@@ -437,44 +458,33 @@ n_rows = len(list_results)
 n_cols = n_denoisers + 2
 fig, axs = plt.subplots(n_rows, n_cols, figsize=(4*n_cols, 4*n_rows))
 
-
-def save_img(img, title, idx, name, ax, reg=None):
-    # Save image, both as a single file and in
-
-    fig, ax_ = plt.subplots()
-    for a in (ax_, ax):
-        a.imshow(img, cmap=None)
-        a.set_axis_off()
-        a.set_title(title)
-
-    fname = f"img_{idx}_{name}"
-    if reg is not None:
-        fname = f"{fname}_{reg=:.0e}"
-    fig.savefig(OUTPUT_DIR / f"{fname}.png")
-    plt.close(fig)
-
-
 for i, results in enumerate(list_results):
 
     idx = i // len(reg_pars)
     x_observed = results["observation"].transpose(1, 2, 0).clip(0, 1)
-    save_img(x_observed, "Observation", idx, name="observed", ax=axs[i, 0])
+    plot_img(
+        x_observed, ax=axs[i, 0], title="Observation",
+        name=f"img_{idx}_observed"
+    )
 
     img = results["truth"].transpose(1, 2, 0).clip(0, 1)
-    save_img(img, "Ground Truth", idx, name="gt", ax=axs[i, 1])
+    plot_img(
+        x_observed, ax=axs[i, 1], title="Ground Truth",
+        name=f"img_{idx}_gt"
+    )
 
     for j, name in enumerate(DENOISERS):
-        res = results[name]
+        res, reg = results[name], results['reg_par']
         img_result = res['img'].transpose(1, 2, 0).clip(0, 1)
         title = (
-            f"PnP-{name}$\\lambda = {results['reg_par']:.0e}$\n"
+            f"PnP-{name}$\\lambda = {reg:.0e}$\n"
             f"PSNR = {results[name]['psnr'][-1]:0.2f} dB"
         )
-        save_img(
-            img_result, title, idx, name=name, ax=axs[i, j+2],
-            reg=results["reg_par"]
+        plot_img(
+            img_result, ax=axs[i, j+2], title=title,
+            name=f"img_{idx}_{name}_{reg=:.0e}"
         )
 
 plt.tight_layout()
-fig.savefig(OUTPUT_DIR / f"example_images_{STD_NOISE=}.pdf", dpi=150)
-plt.clf()
+fig.savefig(OUTPUT_DIR / f"img_full_{STD_NOISE=}.pdf", dpi=150)
+plt.close('all')
