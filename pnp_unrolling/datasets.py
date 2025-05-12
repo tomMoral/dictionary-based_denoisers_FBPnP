@@ -264,6 +264,10 @@ class ImageNetDataset(torch.utils.data.Dataset):
         self.fixed_noise = fixed_noise
         self.color = color
         self.files = []
+
+        if fixed_noise:
+            assert max_sigma_noise == min_sigma_noise
+
         if crop:
             self.crop_transform = Trans.RandomCrop(
                 crop_size,
@@ -307,12 +311,12 @@ class ImageNetDataset(torch.utils.data.Dataset):
                 dtype=self.dtype,
                 device=self.device
             )
+            max_diff = (self.max_sigma_noise - self.min_sigma_noise)
+            scale *= scale * max_diff + self.min_sigma_noise
         else:
-            scale = 1.
-        max_diff = (self.max_sigma_noise - self.min_sigma_noise)
-        noise *= scale * max_diff + self.min_sigma_noise
+            scale = self.max_sigma_noise
 
-        img_noise = torch.clip(new_img + noise, 0, 1)
+        img_noise = new_img + scale * noise
 
         return img_noise, new_img
 

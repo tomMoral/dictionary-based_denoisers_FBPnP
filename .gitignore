@@ -2,6 +2,8 @@
 figures
 results
 checkpoint
+outputs
+BSDS500
 
 # VSCode
 .vscode
